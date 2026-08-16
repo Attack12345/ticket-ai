@@ -1,11 +1,17 @@
 package com.ticketai.config;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.ticketai.entity.AgentDO;
+import com.ticketai.entity.SkillGroupAgentDO;
+import com.ticketai.entity.SkillGroupDO;
 import com.ticketai.entity.SysPermissionDO;
 import com.ticketai.entity.SysRoleDO;
 import com.ticketai.entity.SysRolePermissionDO;
 import com.ticketai.entity.SysUserDO;
 import com.ticketai.entity.SysUserRoleDO;
+import com.ticketai.mapper.AgentMapper;
+import com.ticketai.mapper.SkillGroupAgentMapper;
+import com.ticketai.mapper.SkillGroupMapper;
 import com.ticketai.mapper.SysPermissionMapper;
 import com.ticketai.mapper.SysRoleMapper;
 import com.ticketai.mapper.SysRolePermissionMapper;
@@ -36,6 +42,9 @@ public class DataInitializer implements CommandLineRunner {
     private final SysUserRoleMapper sysUserRoleMapper;
     private final SysRolePermissionMapper sysRolePermissionMapper;
     private final SysPermissionMapper sysPermissionMapper;
+    private final AgentMapper agentMapper;
+    private final SkillGroupMapper skillGroupMapper;
+    private final SkillGroupAgentMapper skillGroupAgentMapper;
 
     @Override
     public void run(String... args) {
@@ -52,6 +61,40 @@ public class DataInitializer implements CommandLineRunner {
         }
 
         initRolePermissions();
+        initAgentProfiles();
+    }
+
+    /** 坐席档案初始化（幂等）：agent01 用户 → agent 档案，并加入售后组 */
+    private void initAgentProfiles() {
+        if (agentMapper.selectCount(new LambdaQueryWrapper<>()) > 0) {
+            return;
+        }
+        SysUserDO agentUser = sysUserMapper.selectOne(new LambdaQueryWrapper<SysUserDO>()
+                .eq(SysUserDO::getUsername, "agent01"));
+        if (agentUser == null) {
+            log.warn("坐席初始化跳过：agent01 用户不存在");
+            return;
+        }
+        AgentDO agent = new AgentDO();
+        agent.setUserId(agentUser.getId());
+        agent.setName("坐席一号");
+        agent.setStatus(1);
+        agent.setCurrentLoad(0);
+        agent.setSkillTags("[\"售后\",\"投诉\"]");
+        agent.setCreateBy("system");
+        agent.setCreateTime(LocalDateTime.now());
+        agent.setUpdateTime(LocalDateTime.now());
+        agentMapper.insert(agent);
+
+        SkillGroupDO afterSale = skillGroupMapper.selectOne(new LambdaQueryWrapper<SkillGroupDO>()
+                .eq(SkillGroupDO::getName, "售后组"));
+        if (afterSale != null) {
+            SkillGroupAgentDO relation = new SkillGroupAgentDO();
+            relation.setGroupId(afterSale.getId());
+            relation.setAgentId(agent.getId());
+            skillGroupAgentMapper.insert(relation);
+        }
+        log.info("坐席档案初始化完成：agent01 -> agent id={}", agent.getId());
     }
 
     /** 角色-权限绑定（幂等）：ADMIN 绑全部权限，AGENT 绑坐席权限 */

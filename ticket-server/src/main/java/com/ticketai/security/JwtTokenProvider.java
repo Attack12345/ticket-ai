@@ -31,15 +31,15 @@ public class JwtTokenProvider {
         this.refreshExpireMs = refreshExpireDays * 24 * 60 * 60_000L;
     }
 
-    public String createAccessToken(Long userId, String username, List<String> permissions) {
-        return build(userId, username, permissions, accessExpireMs);
+    public String createAccessToken(Long userId, String username, Long agentId, List<String> permissions) {
+        return build(userId, username, agentId, permissions, accessExpireMs);
     }
 
     public String createRefreshToken(Long userId, String username) {
-        return build(userId, username, null, refreshExpireMs);
+        return build(userId, username, null, null, refreshExpireMs);
     }
 
-    private String build(Long userId, String username, List<String> permissions, long expireMs) {
+    private String build(Long userId, String username, Long agentId, List<String> permissions, long expireMs) {
         Date now = new Date();
         var builder = Jwts.builder()
                 .subject(String.valueOf(userId))
@@ -47,6 +47,9 @@ public class JwtTokenProvider {
                 .issuedAt(now)
                 .expiration(new Date(now.getTime() + expireMs))
                 .signWith(secretKey);
+        if (agentId != null) {
+            builder.claim("agentId", agentId);
+        }
         if (permissions != null) {
             builder.claim("permissions", permissions);
         }
@@ -66,8 +69,9 @@ public class JwtTokenProvider {
         Claims claims = parse(token);
         Long userId = Long.valueOf(claims.getSubject());
         String username = claims.get("username", String.class);
+        Long agentId = claims.get("agentId", Long.class);
         List<String> permissions = claims.get("permissions", List.class);
-        return new LoginUser(userId, username, null, permissions);
+        return new LoginUser(userId, username, agentId, permissions);
     }
 
     public long getRefreshExpireMs() {

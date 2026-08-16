@@ -5,11 +5,13 @@ import com.ticketai.common.exception.BusinessException;
 import com.ticketai.common.exception.ErrorCode;
 import com.ticketai.dto.LoginDTO;
 import com.ticketai.dto.RefreshDTO;
+import com.ticketai.entity.AgentDO;
 import com.ticketai.entity.SysPermissionDO;
 import com.ticketai.entity.SysRoleDO;
 import com.ticketai.entity.SysRolePermissionDO;
 import com.ticketai.entity.SysUserDO;
 import com.ticketai.entity.SysUserRoleDO;
+import com.ticketai.mapper.AgentMapper;
 import com.ticketai.mapper.SysPermissionMapper;
 import com.ticketai.mapper.SysRoleMapper;
 import com.ticketai.mapper.SysRolePermissionMapper;
@@ -53,6 +55,7 @@ public class AuthServiceImpl implements AuthService {
     private final SysRoleMapper sysRoleMapper;
     private final SysRolePermissionMapper sysRolePermissionMapper;
     private final SysPermissionMapper sysPermissionMapper;
+    private final AgentMapper agentMapper;
     private final PasswordEncoder passwordEncoder;
     private final JwtTokenProvider tokenProvider;
     private final StringRedisTemplate stringRedisTemplate;
@@ -69,7 +72,8 @@ public class AuthServiceImpl implements AuthService {
         }
 
         List<String> permissions = loadPermissions(user.getId());
-        String accessToken = tokenProvider.createAccessToken(user.getId(), user.getUsername(), permissions);
+        Long agentId = loadAgentId(user.getId());
+        String accessToken = tokenProvider.createAccessToken(user.getId(), user.getUsername(), agentId, permissions);
         String refreshToken = tokenProvider.createRefreshToken(user.getId(), user.getUsername());
         storeRefreshToken(user.getId(), refreshToken);
         return new LoginVO(accessToken, refreshToken);
@@ -98,10 +102,17 @@ public class AuthServiceImpl implements AuthService {
         }
 
         List<String> permissions = loadPermissions(userId);
-        String accessToken = tokenProvider.createAccessToken(userId, user.getUsername(), permissions);
+        Long agentId = loadAgentId(userId);
+        String accessToken = tokenProvider.createAccessToken(userId, user.getUsername(), agentId, permissions);
         String refreshToken = tokenProvider.createRefreshToken(userId, user.getUsername());
         storeRefreshToken(userId, refreshToken);
         return new LoginVO(accessToken, refreshToken);
+    }
+
+    /** 查询用户对应的坐席档案 ID（非坐席返回 null） */
+    private Long loadAgentId(Long userId) {
+        AgentDO agent = agentMapper.selectOne(new LambdaQueryWrapper<AgentDO>().eq(AgentDO::getUserId, userId));
+        return agent == null ? null : agent.getId();
     }
 
     /** 加载用户权限码：user → roles → permissions */
