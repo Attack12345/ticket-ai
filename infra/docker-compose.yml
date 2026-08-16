@@ -1,0 +1,48 @@
+# TicketAI 开发环境中间件编排
+# 用法: docker compose up -d    (在 infra/ 目录下执行)
+# 包含: Elasticsearch 8.14.3 + RocketMQ 5.3.1 (namesrv + broker)
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.14.3
+    container_name: ticket-ai-es
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    restart: unless-stopped
+
+  rocketmq-namesrv:
+    image: apache/rocketmq:5.3.1
+    container_name: ticket-ai-namesrv
+    environment:
+      - JAVA_OPT_EXT=-server -Xms512m -Xmx512m -Xmn256m
+    command: sh mqnamesrv
+    ports:
+      - "9876:9876"
+    restart: unless-stopped
+
+  rocketmq-broker:
+    image: apache/rocketmq:5.3.1
+    container_name: ticket-ai-broker
+    # 镜像默认以 rocketmq(uid=3000) 运行，命名卷 store 属 root 无写权限 → 开发环境以 root 运行
+    user: "0"
+    environment:
+      - JAVA_OPT_EXT=-server -Xms512m -Xmx512m -Xmn256m
+    command: sh mqbroker -c /home/rocketmq/conf/broker.conf
+    volumes:
+      - ./broker.conf:/home/rocketmq/conf/broker.conf
+      - rmq-store:/home/rocketmq/store
+    ports:
+      - "10911:10911"
+      - "10909:10909"
+    depends_on:
+      - rocketmq-namesrv
+    restart: unless-stopped
+
+volumes:
+  es-data:
+  rmq-store:
