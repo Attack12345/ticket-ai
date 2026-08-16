@@ -18,6 +18,42 @@
 
 ---
 
+## §0.5 环境基线（新会话/新 AI 接手必读）
+
+### 0.5.1 本机环境（Windows，勿假设 Linux）
+
+- JDK 23（编译目标 `release=21`）、Maven 3.9.9、Node 22；应用固定端口 **8090**（8080 被其他项目占用）
+- MySQL 8.0.42：Windows 服务 `MySQL`（root/1234），库 `ticket_ai`；**JDBC URL 的 characterEncoding 必须写 UTF-8**（写 utf8mb4 会连接失败）
+- Redis 3.0.504：Windows 服务，127.0.0.1:6379；**禁止调用 `expire(key, Duration)`**（spring-data-redis 3.5 + Redis 3.0 下默认方法互调 StackOverflow），用 Lua 脚本或 set 带过期参数
+- Elasticsearch 8.14.3 + RocketMQ 5.3.1：Docker 容器，编排文件 `infra/docker-compose.yml`（restart: unless-stopped）；ES 9200 / namesrv 9876 / broker 10911
+- **RocketMQ broker.conf 已加 `enableScheduleMessage=true`**（延迟消息必需，勿删）；容器默认以 root 运行（`user: "0"`，命名卷权限原因）
+
+### 0.5.2 已解决的环境坑（勿重踩）
+
+1. JDK 23 默认 `-proc:none` → pom 的 maven-compiler-plugin 必须保留 `<proc>full</proc>` + lombok annotationProcessorPaths
+2. MyBatis-Plus 3.5.9+ 分页插件在独立模块 → 依赖 `mybatis-plus-jsqlparser` 不可删
+3. MP 3.5.17 `@Version` 拦截器在 version=0 实体更新报 `MP_OPTLOCK_VERSION_ORIGINAL not found` → transition 用 **UpdateWrapper 显式乐观锁**（见 §4.2.1），`@Version` 注解保留但不再依赖其拦截器
+4. `LambdaUpdateWrapper` 的 lambda 解析依赖 MP 运行时缓存，纯 Mockito 单测不可用 → 状态变更统一用字符串 `UpdateWrapper`
+5. rocketmq-spring-boot-starter 监听器泛型必须 `RocketMQListener<String>`（byte[] 会 ClassCastException）
+6. MP BaseMapper 3.5.17 有批量重载 → Mockito `when/verify` 必须显式类型 `any(XxxDO.class)`，裸 `any()` 报引用不明确；基本类型参数用 `anyLong()` 等
+7. Git Bash 里 curl 命令行直接带中文会被转 GBK 发送（Jackson 解析失败 500）→ JSON 写 UTF-8 文件用 `--data-binary @file`
+8. Git Bash MSYS 路径转换会破坏 docker `-v` 卷参数（`/home/...` 变 `C:/Program...`）→ 用 compose 相对路径或 `MSYS_NO_PATHCONV=1`
+
+### 0.5.3 启动与验证
+
+- 启动：`cd ticket-server && mvn spring-boot:run`（端口 8090）
+- 演示账号：`admin / Admin@12345`（管理员）、`agent01 / Admin@12345`（坐席）
+- 全量测试：`mvn test`（当前 24 用例全绿）
+- 中间件自检：`docker ps` 应见 ticket-ai-es / ticket-ai-namesrv / ticket-ai-broker 三个容器
+
+### 0.5.4 当前进度（2026-08-16）
+
+- 已完成：M1（骨架/登录/状态机）、M2（渠道幂等/坐席技能组）、M3（SLA 引擎全链路：延迟消息+补偿扫描+升级，1 分钟策略实测通过）
+- 状态机矩阵 = **23 条**（§5.1.3 为准，含 PENDING_ASSIGN --TIMEOUT_ESCALATE）
+- 下一里程碑：M4 分派与并发；git 已打 tag M1/M2/M3，每个里程碑完成推送 GitHub（Attack12345/ticket-ai）
+
+---
+
 ## §1 项目概述
 
 ### 1.1 定位
@@ -381,20 +417,19 @@ public enum TicketStatus {
 2. `TicketService#transition(ticketId, event)` 流程：查工单 → `stateMachine.canTransition` 校验（不通过抛 `BusinessException(ILLEGAL_TRANSITION)`，message 带当前状态与事件）→ 权限校验（`requiredPermission` 非 SYSTEM 时检查当前用户）→ 乐观锁更新 ticket.status → 写 ticket_status_log → 触发事件后置动作（§5.1.5）。
 3. 非法流转必须抛异常并记录日志，禁止静默忽略。
 
-### 5.1.5 事件后置动作（在 transition 事务内/事务提交后执行）
+### 5.1.5 事件后置动作（实现约定：与状态更新并入 transition 的**同一条 UPDATE**，禁止二次 updateById）
 
-| 事件 | 后置动作 |
+| 事件 | 后置动作（UPDATE 的 SET 字段） |
 |---|---|
-| SUBMIT | 创建 ticket_sla（按优先级匹配策略），投递延迟消息 |
-| AUTO_ASSIGN / MANUAL_ASSIGN | 写 agent_id、group_id；若已有 SLA 未启动计时 → 启动 |
-| CLAIM | 写 agent_id、group_id=NULL、current_load+1 |
-| REPLY | 若 first_responded_at 为空 → 置当前时间（首次响应计时停止） |
-| CUSTOMER_REPLY | current_load 不变 |
-| RESOLVE | 置 resolved_at；ticket_sla.resolved_at、resolve_status 结算 |
-| CLOSE | 置 closed_at；坐席 current_load-1 |
-| REOPEN | 清 resolved_at/closed_at；重建 ticket_sla（重新计时） |
-| ESCALATE / TIMEOUT_ESCALATE | ticket_sla.escalation_triggered=1、escalated_at；按 sla_policy.escalate_action 执行（通知/重分派） |
-| CANCEL | 置 closed_at |
+| SUBMIT | 创建 ticket_sla（按优先级匹配策略），投递延迟消息（在 create() 事务内调用 SlaService） |
+| AUTO_ASSIGN / MANUAL_ASSIGN | 写 agent_id、group_id（M4 实现） |
+| CLAIM | 写 agent_id、group_id=NULL、current_load+1（M4 实现） |
+| REPLY | 若 first_responded_at 为空 → SET first_responded_at=now（首次响应计时停止） |
+| RESOLVE | SET resolved_at=now；ticket_sla 结算 |
+| CLOSE | SET closed_at=now；坐席 current_load-1 |
+| REOPEN | SET resolved_at=NULL、closed_at=NULL |
+| ESCALATE / TIMEOUT_ESCALATE | ticket_sla.escalation_triggered=1、escalated_at（在 SlaService 侧处理） |
+| CANCEL | SET closed_at=now |
 
 ## §5.2 SLA 引擎（延迟消息 + 补偿扫描，双保险）
 
@@ -419,7 +454,7 @@ SUBMIT(创建工单)
 
 - Topic：`ticket-sla-check`，Tag：`FIRST_RESPONSE` / `RESOLVE`。
 - 消息体：`SlaMessage(ticketId, slaId, checkType, deadline)`，JSON 序列化。
-- 延迟投递：RocketMQ 5.x 定时消息（`message.setDeliverTime(毫秒时间戳)`，支持任意延迟）；若所连版本不支持，降级为 18 级延迟级别中最接近的一级，并在注释中说明。
+- 延迟投递：RocketMQ 5.x 定时消息（`message.setDeliverTimeMs(毫秒时间戳)`，支持任意延迟）。**前置条件：broker.conf 必须配置 `enableScheduleMessage=true`**（默认关闭，本机已配置，见 §0.5.1）。
 - 消费失败：RocketMQ 默认重试（16 次退避），重试耗尽仍失败 → 记录日志并由补偿扫描兜底。**禁止配置死信队列消费后静默丢弃**。
 
 ### 5.2.3 结算规则
