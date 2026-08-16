@@ -1,0 +1,51 @@
+server:
+  port: 8090   # 本机 8080 被其他应用占用，ticket-ai 固定使用 8090
+
+spring:
+  application:
+    name: ticket-ai
+  profiles:
+    active: dev
+  mvc:
+    throw-exception-if-no-handler-found: true
+  jackson:
+    time-zone: Asia/Shanghai
+    date-format: yyyy-MM-dd HH:mm:ss
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    banner: false
+    db-config:
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    path: /swagger-ui.html
+
+app:
+  jwt:
+    secret: ticket-ai-dev-secret-key-change-me-in-production-0123456789abcdef
+    access-expire-minutes: 30
+    refresh-expire-days: 7
+  llm:
+    base-url: ${LLM_BASE_URL:http://127.0.0.1:8000/v1}
+    api-key: ${LLM_API_KEY:}
+    chat-model: ${LLM_CHAT_MODEL:gpt-4o-mini}
+    embed-model: ${LLM_EMBED_MODEL:text-embedding-3-small}
+    embed-dims: 1536
+    timeout-ms: 15000
+  es:
+    uris: http://127.0.0.1:9200
+  sla:
+    compensation-cron: "0 */5 * * * ?"
+
+logging:
+  level:
+    com.ticketai: debug
