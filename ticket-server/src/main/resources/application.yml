@@ -29,6 +29,11 @@ springdoc:
   swagger-ui:
     path: /swagger-ui.html
 
+rocketmq:
+  name-server: 127.0.0.1:9876
+  producer:
+    group: ticket-sla-producer
+
 app:
   jwt:
     secret: ticket-ai-dev-secret-key-change-me-in-production-0123456789abcdef

@@ -13,11 +13,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * 状态机测试（DEV_DOC M1 DoD）：
- * 覆盖矩阵全部 22 条合法转移 + 全量非法组合断言。
+ * 覆盖矩阵全部 23 条合法转移 + 全量非法组合断言。
  */
 class StateMachineTest {
 
-    /** 权威矩阵：22 条合法转移（DEV_DOC §5.1.3） */
+    /** 权威矩阵：23 条合法转移（DEV_DOC §5.1.3） */
     private static final List<Transition> EXPECTED = List.of(
             new Transition(TicketStatus.NEW, TicketEvent.SUBMIT, TicketStatus.PENDING_ASSIGN, "ticket:view"),
             new Transition(TicketStatus.NEW, TicketEvent.CANCEL, TicketStatus.CANCELLED, "ticket:view"),
@@ -26,6 +26,7 @@ class StateMachineTest {
             new Transition(TicketStatus.PENDING_ASSIGN, TicketEvent.MANUAL_ASSIGN, TicketStatus.PROCESSING, "ticket:assign"),
             new Transition(TicketStatus.PENDING_ASSIGN, TicketEvent.CLAIM, TicketStatus.PROCESSING, "ticket:claim"),
             new Transition(TicketStatus.PENDING_ASSIGN, TicketEvent.ESCALATE, TicketStatus.ESCALATED, "ticket:escalate"),
+            new Transition(TicketStatus.PENDING_ASSIGN, TicketEvent.TIMEOUT_ESCALATE, TicketStatus.ESCALATED, "SYSTEM"),
             new Transition(TicketStatus.PENDING_ASSIGN, TicketEvent.CANCEL, TicketStatus.CANCELLED, "ticket:close"),
 
             new Transition(TicketStatus.PROCESSING, TicketEvent.REPLY, TicketStatus.WAITING_CUSTOMER, "ticket:reply"),
@@ -49,9 +50,9 @@ class StateMachineTest {
             new Transition(TicketStatus.ESCALATED, TicketEvent.CANCEL, TicketStatus.CANCELLED, "ticket:close"));
 
     @Test
-    @DisplayName("全部 22 条合法转移可触发且目标状态/权限正确")
+    @DisplayName("全部 23 条合法转移可触发且目标状态/权限正确")
     void allLegalTransitions() {
-        assertEquals(22, EXPECTED.size(), "权威矩阵应恰好 22 条");
+        assertEquals(23, EXPECTED.size(), "权威矩阵应恰好 23 条");
         for (Transition expected : EXPECTED) {
             Transition actual = StateMachine.getTransition(expected.from(), expected.event());
             assertNotNull(actual, "缺失转移: " + expected.from() + " -> " + expected.event());
@@ -81,7 +82,7 @@ class StateMachineTest {
                 }
             }
         }
-        assertEquals(22, legal, "合法转移总数应为 22");
+        assertEquals(23, legal, "合法转移总数应为 23");
     }
 
     @Test

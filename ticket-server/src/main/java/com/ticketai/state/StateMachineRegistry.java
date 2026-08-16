@@ -22,6 +22,7 @@ public final class StateMachineRegistry {
         register(TicketStatus.PENDING_ASSIGN, TicketEvent.MANUAL_ASSIGN, TicketStatus.PROCESSING, "ticket:assign");
         register(TicketStatus.PENDING_ASSIGN, TicketEvent.CLAIM, TicketStatus.PROCESSING, "ticket:claim");
         register(TicketStatus.PENDING_ASSIGN, TicketEvent.ESCALATE, TicketStatus.ESCALATED, "ticket:escalate");
+        register(TicketStatus.PENDING_ASSIGN, TicketEvent.TIMEOUT_ESCALATE, TicketStatus.ESCALATED, SYSTEM);
         register(TicketStatus.PENDING_ASSIGN, TicketEvent.CANCEL, TicketStatus.CANCELLED, "ticket:close");
 
         register(TicketStatus.PROCESSING, TicketEvent.REPLY, TicketStatus.WAITING_CUSTOMER, "ticket:reply");

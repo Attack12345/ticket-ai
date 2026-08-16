@@ -1,6 +1,7 @@
 package com.ticketai.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.ticketai.common.PageResult;
 import com.ticketai.common.exception.BusinessException;
@@ -14,6 +15,8 @@ import com.ticketai.mapper.TicketStatusLogMapper;
 import com.ticketai.query.TicketQuery;
 import com.ticketai.security.LoginUser;
 import com.ticketai.security.UserContextHolder;
+import com.ticketai.event.SlaTimeoutEvent;
+import com.ticketai.service.SlaService;
 import com.ticketai.service.TicketService;
 import com.ticketai.state.StateMachine;
 import com.ticketai.state.TicketEvent;
@@ -23,6 +26,7 @@ import com.ticketai.vo.TicketStatusLogVO;
 import com.ticketai.vo.TicketVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -41,6 +45,7 @@ public class TicketServiceImpl implements TicketService {
     private final TicketMapper ticketMapper;
     private final TicketStatusLogMapper ticketStatusLogMapper;
     private final TicketNoGenerator ticketNoGenerator;
+    private final SlaService slaService;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -63,8 +68,17 @@ public class TicketServiceImpl implements TicketService {
 
         writeStatusLog(ticket.getId(), TicketStatus.NEW, TicketStatus.PENDING_ASSIGN,
                 TicketEvent.SUBMIT, currentUserId(), "USER", "工单创建");
+        // SLA 计时启动（M3）
+        slaService.createTicketSla(ticket.getId(), ticket.getPriority());
         log.info("工单创建: id={}, ticketNo={}", ticket.getId(), ticket.getTicketNo());
         return ticket;
+    }
+
+    /** SLA 超时升级事件 → 状态机 SYSTEM 事件流转 */
+    @EventListener
+    @Transactional(rollbackFor = Exception.class)
+    public void onSlaTimeout(SlaTimeoutEvent event) {
+        transition(event.ticketId(), TicketEvent.TIMEOUT_ESCALATE, null, "SYSTEM");
     }
 
     @Override
@@ -110,20 +124,50 @@ public class TicketServiceImpl implements TicketService {
             checkPermission(transition.requiredPermission());
         }
 
-        // 3. 乐观锁更新状态（@Version 自动携带 version 条件，冲突抛异常）
-        ticket.setStatus(transition.to().getCode());
-        ticket.setUpdateBy(currentUsername());
-        ticket.setUpdateTime(LocalDateTime.now());
-        int rows = ticketMapper.updateById(ticket);
+        // 3. 乐观锁更新：显式 WHERE version + 状态双条件（MP @Version 拦截器在
+        //    version=0 的实体更新路径存在参数注入缺陷，故用 UpdateWrapper 显式实现；
+        //    不用 LambdaUpdateWrapper：其 lambda 解析依赖 MP 运行时缓存，纯单测环境不可用）
+        LocalDateTime now = LocalDateTime.now();
+        UpdateWrapper<TicketDO> update = new UpdateWrapper<TicketDO>()
+                .eq("id", ticketId)
+                .eq("version", ticket.getVersion())
+                .eq("status", from.getCode())
+                .set("status", transition.to().getCode())
+                .set("version", ticket.getVersion() + 1)
+                .set("update_by", currentUsername())
+                .set("update_time", now);
+        // 事件后置动作并入同一条 UPDATE（DEV_DOC §5.1.5 时间戳结算部分）
+        if (event == TicketEvent.REPLY && ticket.getFirstRespondedAt() == null) {
+            update.set("first_responded_at", now);
+        } else if (event == TicketEvent.RESOLVE) {
+            update.set("resolved_at", now);
+        } else if (event == TicketEvent.CLOSE || event == TicketEvent.CANCEL) {
+            update.set("closed_at", now);
+        } else if (event == TicketEvent.REOPEN) {
+            update.set("resolved_at", null).set("closed_at", null);
+        }
+        int rows = ticketMapper.update(null, update);
         if (rows == 0) {
             throw new BusinessException(ErrorCode.CONCURRENT_MODIFY);
+        }
+        // 同步内存对象（返回给调用方，含后置动作时间戳）
+        ticket.setStatus(transition.to().getCode());
+        ticket.setVersion(ticket.getVersion() + 1);
+        ticket.setUpdateTime(now);
+        if (event == TicketEvent.REPLY && ticket.getFirstRespondedAt() == null) {
+            ticket.setFirstRespondedAt(now);
+        } else if (event == TicketEvent.RESOLVE) {
+            ticket.setResolvedAt(now);
+        } else if (event == TicketEvent.CLOSE || event == TicketEvent.CANCEL) {
+            ticket.setClosedAt(now);
+        } else if (event == TicketEvent.REOPEN) {
+            ticket.setResolvedAt(null);
+            ticket.setClosedAt(null);
         }
 
         // 4. 状态日志
         writeStatusLog(ticketId, from, transition.to(), event, operatorId, operatorType, null);
 
-        // 5. 事件后置动作（M1 范围：时间戳结算；SLA/分派/负载在 M2-M4 扩展）
-        applyPostActions(ticket, transition.to(), event);
         log.info("工单流转: id={}, {} --{}--> {}", ticketId, from.getDesc(), event.getDesc(), transition.to().getDesc());
         return ticket;
     }
@@ -168,24 +212,7 @@ public class TicketServiceImpl implements TicketService {
         ticketStatusLogMapper.insert(logEntry);
     }
 
-    /** 事件后置动作（DEV_DOC §5.1.5，M1 实现时间戳结算部分） */
-    private void applyPostActions(TicketDO ticket, TicketStatus to, TicketEvent event) {
-        LocalDateTime now = LocalDateTime.now();
-        if (event == TicketEvent.REPLY && ticket.getFirstRespondedAt() == null) {
-            ticket.setFirstRespondedAt(now);
-            ticketMapper.updateById(ticket);
-        } else if (event == TicketEvent.RESOLVE) {
-            ticket.setResolvedAt(now);
-            ticketMapper.updateById(ticket);
-        } else if (event == TicketEvent.CLOSE || event == TicketEvent.CANCEL) {
-            ticket.setClosedAt(now);
-            ticketMapper.updateById(ticket);
-        } else if (event == TicketEvent.REOPEN) {
-            ticket.setResolvedAt(null);
-            ticket.setClosedAt(null);
-            ticketMapper.updateById(ticket);
-        }
-    }
+    /** 事件后置动作已并入 transition 的单条 UPDATE（时间戳结算），无独立方法 */
 
     private void applySort(LambdaQueryWrapper<TicketDO> wrapper, String sort) {
         if (sort == null || sort.isBlank()) {

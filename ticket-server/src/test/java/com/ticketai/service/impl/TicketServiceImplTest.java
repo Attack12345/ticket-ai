@@ -10,6 +10,7 @@ import com.ticketai.mapper.TicketMapper;
 import com.ticketai.mapper.TicketStatusLogMapper;
 import com.ticketai.security.LoginUser;
 import com.ticketai.security.UserContextHolder;
+import com.ticketai.service.SlaService;
 import com.ticketai.state.TicketEvent;
 import com.ticketai.state.TicketStatus;
 import org.junit.jupiter.api.AfterEach;
@@ -44,12 +45,14 @@ class TicketServiceImplTest {
     private TicketStatusLogMapper ticketStatusLogMapper;
     @Mock
     private TicketNoGenerator ticketNoGenerator;
+    @Mock
+    private SlaService slaService;
 
     private TicketServiceImpl ticketService;
 
     @BeforeEach
     void setUp() {
-        ticketService = new TicketServiceImpl(ticketMapper, ticketStatusLogMapper, ticketNoGenerator);
+        ticketService = new TicketServiceImpl(ticketMapper, ticketStatusLogMapper, ticketNoGenerator, slaService);
     }
 
     @AfterEach
@@ -96,7 +99,7 @@ class TicketServiceImplTest {
     @DisplayName("合法流转：待分派 + CLAIM → 处理中")
     void legalClaimTransition() {
         when(ticketMapper.selectById(1L)).thenReturn(pendingAssignTicket(1L));
-        when(ticketMapper.updateById(any(TicketDO.class))).thenReturn(1);
+        when(ticketMapper.update(any(), any())).thenReturn(1);
         loginAs("agent01", "ticket:view", "ticket:claim");
 
         TicketDO result = ticketService.transition(1L, TicketEvent.CLAIM, 1L, "USER");
@@ -133,7 +136,7 @@ class TicketServiceImplTest {
     @DisplayName("乐观锁冲突：updateById 影响 0 行 → CONCURRENT_MODIFY")
     void optimisticLockConflict() {
         when(ticketMapper.selectById(1L)).thenReturn(pendingAssignTicket(1L));
-        when(ticketMapper.updateById(any(TicketDO.class))).thenReturn(0);
+        when(ticketMapper.update(any(), any())).thenReturn(0);
         loginAs("agent01", "ticket:claim");
 
         BusinessException ex = assertThrows(BusinessException.class,
@@ -158,7 +161,7 @@ class TicketServiceImplTest {
         TicketDO processing = pendingAssignTicket(1L);
         processing.setStatus(TicketStatus.PROCESSING.getCode());
         when(ticketMapper.selectById(1L)).thenReturn(processing);
-        when(ticketMapper.updateById(any(TicketDO.class))).thenReturn(1);
+        when(ticketMapper.update(any(), any())).thenReturn(1);
         loginAs("agent01", "ticket:reply");
 
         TicketDO result = ticketService.transition(1L, TicketEvent.REPLY, 1L, "USER");
@@ -173,7 +176,7 @@ class TicketServiceImplTest {
         TicketDO processing = pendingAssignTicket(1L);
         processing.setStatus(TicketStatus.PROCESSING.getCode());
         when(ticketMapper.selectById(1L)).thenReturn(processing);
-        when(ticketMapper.updateById(any(TicketDO.class))).thenReturn(1);
+        when(ticketMapper.update(any(), any())).thenReturn(1);
         loginAs("agent01", "ticket:resolve");
 
         TicketDO resolved = ticketService.transition(1L, TicketEvent.RESOLVE, 1L, "USER");

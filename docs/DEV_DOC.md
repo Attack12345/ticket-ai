@@ -277,7 +277,7 @@ ticket-server/
 
 ### 4.2 关键设计约束
 
-1. **乐观锁**：所有对 `ticket` 的状态变更 SQL 必须携带 `WHERE version = #{expectVersion}` 且 `SET version = version + 1`，影响行数为 0 时抛 `BusinessException(CONCURRENT_MODIFY)`。MyBatis-Plus 用 `@Version` 注解自动处理。
+1. **乐观锁**：所有对 `ticket` 的状态变更 SQL 必须携带 `WHERE version = #{expectVersion}` 且 `SET version = version + 1`，影响行数为 0 时抛 `BusinessException(CONCURRENT_MODIFY)`。**实现约定：transition 用 UpdateWrapper 显式拼接 version 条件**（实测 MyBatis-Plus 3.5.17 的 `@Version` 拦截器在 version=0 的实体更新路径存在 `MP_OPTLOCK_VERSION_ORIGINAL` 参数注入缺陷，且 LambdaUpdateWrapper 依赖 MP 运行时缓存、纯单测不可用；显式 wrapper 语义一致、SQL 可审计）。
 2. **状态变更唯一入口**：任何代码不得直接 `UPDATE ticket SET status=...`，必须走 `TicketService#transition()`（内部调状态机 + 写 ticket_status_log + 更新 ticket_sla）。
 3. **幂等创建**：渠道消息 `message_no` 唯一冲突时返回已存在工单，不重复创建。
 4. **编号生成**：`ticket_no = "T" + yyyyMMdd + 6位序列`（当天自增，Redis INCR，key `ticket:no:{yyyyMMdd}`），冲突兜底重试 3 次。
@@ -331,6 +331,7 @@ ticket-server/
 | PENDING_ASSIGN | MANUAL_ASSIGN | PROCESSING | ticket:assign |
 | PENDING_ASSIGN | CLAIM | PROCESSING | ticket:claim |
 | PENDING_ASSIGN | ESCALATE | ESCALATED | ticket:escalate |
+| PENDING_ASSIGN | TIMEOUT_ESCALATE | ESCALATED | SYSTEM |
 | PENDING_ASSIGN | CANCEL | CANCELLED | ticket:close |
 | PROCESSING | REPLY | WAITING_CUSTOMER | ticket:reply |
 | PROCESSING | RESOLVE | RESOLVED | ticket:resolve |
@@ -629,7 +630,7 @@ RLock lock = redissonClient.getLock("ticket:claim:" + ticketId);
 - 建库执行 schema.sql；Spring Boot 工程骨架；MyBatis-Plus/Redis/Redisson/knife4j 配置；统一返回与全局异常；admin 初始化（CommandLineRunner）
 - JWT 双 token 登录 + SecurityConfig 白名单 + UserContextHolder
 - ticket CRUD + ticket_status_log 写入 + 状态机全部代码 + 编号生成器
-- **DoD**：启动无报错；登录接口通；创建工单状态为 2；`StateMachineTest` 覆盖矩阵全部 22 条转移 + 至少 10 条非法转移断言；`TicketServiceTest` 覆盖乐观锁冲突
+- **DoD**：启动无报错；登录接口通；创建工单状态为 2；`StateMachineTest` 覆盖矩阵全部 23 条转移 + 至少 10 条非法转移断言；`TicketServiceTest` 覆盖乐观锁冲突
 
 ### M2 渠道 + 坐席/技能组（Week 2）
 
