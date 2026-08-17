@@ -82,7 +82,7 @@ const priorityMap = Object.fromEntries(priorityOptions.map(p => [p.value, p.labe
 const loading = ref(false)
 const records = ref([])
 const total = ref(0)
-const query = reactive({ page: 1, size: 10, keyword: '', status: null, priority: null, category: '' })
+const query = reactive({ page: 1, size: 10, keyword: '', status: null, priority: null, category: null })
 
 const statusType = s => ({ 1: 'info', 2: 'warning', 3: 'primary', 4: 'info', 5: 'success', 6: 'info', 7: 'danger', 8: 'info' }[s] || 'info')
 const priorityType = p => ({ 1: 'danger', 2: 'warning', 3: 'primary', 4: 'info' }[p] || 'info')
@@ -91,7 +91,11 @@ const priorityLabel = p => priorityMap[p] || p
 async function load() {
   loading.value = true
   try {
-    const data = await ticketApi.list(query)
+    // 过滤空字符串/空值，避免 category= 等空参数被后端当作筛选条件
+    const params = Object.fromEntries(
+      Object.entries(query).filter(([, v]) => v !== '' && v != null)
+    )
+    const data = await ticketApi.list(params)
     records.value = data.records
     total.value = data.total
   } finally {
@@ -103,7 +107,7 @@ function reset() {
   query.keyword = ''
   query.status = null
   query.priority = null
-  query.category = ''
+  query.category = null
   query.page = 1
   load()
 }

@@ -208,7 +208,9 @@ public class TicketServiceImpl implements TicketService {
         LambdaQueryWrapper<TicketDO> wrapper = new LambdaQueryWrapper<TicketDO>()
                 .eq(query.getStatus() != null, TicketDO::getStatus, query.getStatus())
                 .eq(query.getPriority() != null, TicketDO::getPriority, query.getPriority())
-                .eq(query.getCategory() != null, TicketDO::getCategory, query.getCategory())
+                // 空字符串视为未筛选（前端可能发送 category=）
+                .eq(query.getCategory() != null && !query.getCategory().isBlank(),
+                        TicketDO::getCategory, query.getCategory())
                 .eq(query.getAgentId() != null, TicketDO::getAgentId, query.getAgentId())
                 .ge(query.getStartTime() != null, TicketDO::getCreateTime, query.getStartTime())
                 .le(query.getEndTime() != null, TicketDO::getCreateTime, query.getEndTime())
