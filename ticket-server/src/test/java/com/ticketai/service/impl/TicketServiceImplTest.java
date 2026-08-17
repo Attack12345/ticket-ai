@@ -47,12 +47,21 @@ class TicketServiceImplTest {
     private TicketNoGenerator ticketNoGenerator;
     @Mock
     private SlaService slaService;
+    @Mock
+    private org.redisson.api.RedissonClient redissonClient;
+    @Mock
+    private com.ticketai.mapper.AgentMapper agentMapper;
+    @Mock
+    private com.ticketai.mapper.TicketCommentMapper ticketCommentMapper;
+    @Mock
+    private org.springframework.context.ApplicationEventPublisher eventPublisher;
 
     private TicketServiceImpl ticketService;
 
     @BeforeEach
     void setUp() {
-        ticketService = new TicketServiceImpl(ticketMapper, ticketStatusLogMapper, ticketNoGenerator, slaService);
+        ticketService = new TicketServiceImpl(ticketMapper, ticketStatusLogMapper, ticketNoGenerator,
+                slaService, eventPublisher, redissonClient, agentMapper, ticketCommentMapper);
     }
 
     @AfterEach

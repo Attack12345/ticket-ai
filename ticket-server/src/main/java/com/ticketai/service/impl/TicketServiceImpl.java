@@ -7,15 +7,22 @@ import com.ticketai.common.PageResult;
 import com.ticketai.common.exception.BusinessException;
 import com.ticketai.common.exception.ErrorCode;
 import com.ticketai.common.util.TicketNoGenerator;
+import com.ticketai.dto.AcceptCategoryDTO;
 import com.ticketai.dto.TicketCreateDTO;
+import com.ticketai.dto.TicketReplyDTO;
+import com.ticketai.entity.AgentDO;
+import com.ticketai.entity.TicketCommentDO;
 import com.ticketai.entity.TicketDO;
 import com.ticketai.entity.TicketStatusLogDO;
+import com.ticketai.mapper.AgentMapper;
+import com.ticketai.mapper.TicketCommentMapper;
 import com.ticketai.mapper.TicketMapper;
 import com.ticketai.mapper.TicketStatusLogMapper;
 import com.ticketai.query.TicketQuery;
 import com.ticketai.security.LoginUser;
 import com.ticketai.security.UserContextHolder;
 import com.ticketai.event.SlaTimeoutEvent;
+import com.ticketai.event.TicketCreatedEvent;
 import com.ticketai.service.SlaService;
 import com.ticketai.service.TicketService;
 import com.ticketai.state.StateMachine;
@@ -26,12 +33,18 @@ import com.ticketai.vo.TicketStatusLogVO;
 import com.ticketai.vo.TicketVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 工单服务（DEV_DOC §5.1.4）。
@@ -46,6 +59,10 @@ public class TicketServiceImpl implements TicketService {
     private final TicketStatusLogMapper ticketStatusLogMapper;
     private final TicketNoGenerator ticketNoGenerator;
     private final SlaService slaService;
+    private final ApplicationEventPublisher eventPublisher;
+    private final RedissonClient redissonClient;
+    private final AgentMapper agentMapper;
+    private final TicketCommentMapper ticketCommentMapper;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -70,6 +87,17 @@ public class TicketServiceImpl implements TicketService {
                 TicketEvent.SUBMIT, currentUserId(), "USER", "工单创建");
         // SLA 计时启动（M3）
         slaService.createTicketSla(ticket.getId(), ticket.getPriority());
+        // 事务提交后发布创建事件（自动分派等异步链路，保证数据可见）；无事务环境（单测）直接发布
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    eventPublisher.publishEvent(new TicketCreatedEvent(ticket));
+                }
+            });
+        } else {
+            eventPublisher.publishEvent(new TicketCreatedEvent(ticket));
+        }
         log.info("工单创建: id={}, ticketNo={}", ticket.getId(), ticket.getTicketNo());
         return ticket;
     }
@@ -79,6 +107,99 @@ public class TicketServiceImpl implements TicketService {
     @Transactional(rollbackFor = Exception.class)
     public void onSlaTimeout(SlaTimeoutEvent event) {
         transition(event.ticketId(), TicketEvent.TIMEOUT_ESCALATE, null, "SYSTEM");
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public TicketDO claim(Long ticketId) {
+        LoginUser user = UserContextHolder.get();
+        if (user == null || user.getAgentId() == null) {
+            throw new BusinessException(ErrorCode.FORBIDDEN, "非坐席账号不能领取工单");
+        }
+        // 1. Redis 分布式锁（Redisson，lease 10s，等待 3s）
+        RLock lock = redissonClient.getLock("ticket:claim:" + ticketId);
+        boolean locked;
+        try {
+            locked = lock.tryLock(3, 10, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new BusinessException(ErrorCode.CONCURRENT_MODIFY);
+        }
+        if (!locked) {
+            throw new BusinessException(ErrorCode.CONCURRENT_MODIFY, "工单正在被其他坐席处理，请稍后重试");
+        }
+        try {
+            TicketDO ticket = requireTicket(ticketId);
+            TicketStatus from = TicketStatus.byCode(ticket.getStatus());
+            if (!StateMachine.canTransition(from, TicketEvent.CLAIM)) {
+                throw new BusinessException(ErrorCode.ILLEGAL_TRANSITION,
+                        String.format("当前状态[%s]不允许领取", from.getDesc()));
+            }
+            // 2. 显式乐观锁 + 状态 + 无主三条件（双保险，影响 0 行 = 已被抢）
+            LocalDateTime now = LocalDateTime.now();
+            UpdateWrapper<TicketDO> update = new UpdateWrapper<TicketDO>()
+                    .eq("id", ticketId)
+                    .eq("status", TicketStatus.PENDING_ASSIGN.getCode())
+                    .eq("version", ticket.getVersion())
+                    .isNull("agent_id")
+                    .set("status", TicketStatus.PROCESSING.getCode())
+                    .set("agent_id", user.getAgentId())
+                    .set("group_id", null)
+                    .set("version", ticket.getVersion() + 1)
+                    .set("update_by", user.getUsername())
+                    .set("update_time", now);
+            int rows = ticketMapper.update(null, update);
+            if (rows == 0) {
+                throw new BusinessException(ErrorCode.CONCURRENT_MODIFY, "工单已被其他坐席领取");
+            }
+            // 3. 状态日志 + 负载计数
+            writeStatusLog(ticketId, from, TicketStatus.PROCESSING, TicketEvent.CLAIM,
+                    user.getUserId(), "USER", null);
+            agentMapper.update(null, new UpdateWrapper<AgentDO>()
+                    .eq("id", user.getAgentId())
+                    .setSql("current_load = current_load + 1"));
+            // 4. 内存对象同步
+            ticket.setStatus(TicketStatus.PROCESSING.getCode());
+            ticket.setAgentId(user.getAgentId());
+            ticket.setGroupId(null);
+            ticket.setVersion(ticket.getVersion() + 1);
+            ticket.setUpdateTime(now);
+            log.info("坐席抢单成功: ticketId={}, agentId={}", ticketId, user.getAgentId());
+            return ticket;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public TicketDO reply(Long ticketId, TicketReplyDTO dto) {
+        TicketDO ticket = transition(ticketId, TicketEvent.REPLY, currentUserId(), "USER");
+        TicketCommentDO comment = new TicketCommentDO();
+        comment.setTicketId(ticketId);
+        LoginUser user = UserContextHolder.get();
+        comment.setAgentId(user == null ? null : user.getAgentId());
+        comment.setType("REPLY");
+        comment.setContent(dto.getContent());
+        comment.setVisibility(dto.getVisibility() == null ? "ALL" : dto.getVisibility());
+        comment.setCreateBy(currentUsername());
+        comment.setCreateTime(LocalDateTime.now());
+        comment.setUpdateTime(LocalDateTime.now());
+        ticketCommentMapper.insert(comment);
+        log.info("工单回复: ticketId={}, visibility={}", ticketId, comment.getVisibility());
+        return ticket;
+    }
+
+    @Override
+    public void acceptCategory(Long ticketId, AcceptCategoryDTO dto) {
+        requireTicket(ticketId);
+        UpdateWrapper<TicketDO> update = new UpdateWrapper<TicketDO>()
+                .eq("id", ticketId)
+                .set("category", dto.getCategory())
+                .set("priority", dto.getPriority())
+                .set("update_time", LocalDateTime.now());
+        ticketMapper.update(null, update);
+        log.info("采纳分类: ticketId={}, category={}, priority={}", ticketId, dto.getCategory(), dto.getPriority());
     }
 
     @Override
@@ -109,6 +230,13 @@ public class TicketServiceImpl implements TicketService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public TicketDO transition(Long ticketId, TicketEvent event, Long operatorId, String operatorType) {
+        return transition(ticketId, event, operatorId, operatorType, null, null, null);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public TicketDO transition(Long ticketId, TicketEvent event, Long operatorId, String operatorType,
+                               Long agentId, Long groupId, String assignStrategy) {
         TicketDO ticket = requireTicket(ticketId);
         TicketStatus from = TicketStatus.byCode(ticket.getStatus());
 
@@ -145,6 +273,14 @@ public class TicketServiceImpl implements TicketService {
             update.set("closed_at", now);
         } else if (event == TicketEvent.REOPEN) {
             update.set("resolved_at", null).set("closed_at", null);
+        } else if ((event == TicketEvent.AUTO_ASSIGN || event == TicketEvent.MANUAL_ASSIGN) && agentId != null) {
+            update.set("agent_id", agentId);
+            if (groupId != null) {
+                update.set("group_id", groupId);
+            }
+            if (assignStrategy != null) {
+                update.set("assign_strategy", assignStrategy);
+            }
         }
         int rows = ticketMapper.update(null, update);
         if (rows == 0) {
@@ -163,6 +299,10 @@ public class TicketServiceImpl implements TicketService {
         } else if (event == TicketEvent.REOPEN) {
             ticket.setResolvedAt(null);
             ticket.setClosedAt(null);
+        } else if ((event == TicketEvent.AUTO_ASSIGN || event == TicketEvent.MANUAL_ASSIGN) && agentId != null) {
+            ticket.setAgentId(agentId);
+            ticket.setGroupId(groupId);
+            ticket.setAssignStrategy(assignStrategy);
         }
 
         // 4. 状态日志
