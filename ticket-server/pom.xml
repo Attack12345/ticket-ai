@@ -69,6 +69,13 @@
             <version>2.3.6</version>
         </dependency>
 
+        <!-- ES 客户端（M5 检索，不用 spring-data-elasticsearch） -->
+        <dependency>
+            <groupId>co.elastic.clients</groupId>
+            <artifactId>elasticsearch-java</artifactId>
+            <version>8.14.3</version>
+        </dependency>
+
         <!-- 分布式锁（M4 抢单用） -->
         <dependency>
             <groupId>org.redisson</groupId>
