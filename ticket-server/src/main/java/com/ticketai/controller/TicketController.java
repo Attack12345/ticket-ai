@@ -7,8 +7,10 @@ import com.ticketai.dto.TicketAssignDTO;
 import com.ticketai.dto.TicketCreateDTO;
 import com.ticketai.dto.TicketReplyDTO;
 import com.ticketai.query.TicketQuery;
+import com.ticketai.service.AiService;
 import com.ticketai.service.TicketService;
 import com.ticketai.state.TicketEvent;
+import com.ticketai.vo.AiSuggestVO;
 import com.ticketai.vo.TicketStatusLogVO;
 import com.ticketai.vo.TicketVO;
 import io.swagger.v3.oas.annotations.Operation;
@@ -33,6 +35,7 @@ import java.util.Map;
 public class TicketController {
 
     private final TicketService ticketService;
+    private final AiService aiService;
 
     @GetMapping
     @PreAuthorize("hasAuthority('ticket:view')")
@@ -125,6 +128,13 @@ public class TicketController {
     public Result<TicketVO> cancel(@PathVariable Long id) {
         ticketService.transition(id, TicketEvent.CANCEL, null, "USER");
         return Result.ok(ticketService.getDetail(id));
+    }
+
+    @PostMapping("/{id}/ai-suggest")
+    @PreAuthorize("hasAuthority('ticket:reply')")
+    @Operation(summary = "生成 AI 回复建议（RAG：相似工单+知识库）")
+    public Result<AiSuggestVO> aiSuggest(@PathVariable Long id) {
+        return Result.ok(aiService.suggestReply(id));
     }
 
     @PostMapping("/{id}/accept-category")

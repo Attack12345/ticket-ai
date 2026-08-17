@@ -23,6 +23,7 @@ import com.ticketai.security.LoginUser;
 import com.ticketai.security.UserContextHolder;
 import com.ticketai.event.SlaTimeoutEvent;
 import com.ticketai.event.TicketCreatedEvent;
+import com.ticketai.event.TicketResolvedEvent;
 import com.ticketai.service.SlaService;
 import com.ticketai.service.TicketService;
 import com.ticketai.state.StateMachine;
@@ -307,6 +308,11 @@ public class TicketServiceImpl implements TicketService {
 
         // 4. 状态日志
         writeStatusLog(ticketId, from, transition.to(), event, operatorId, operatorType, null);
+
+        // 已解决 → 发布事件（异步写相似工单索引，供 AI 回复建议召回）
+        if (event == TicketEvent.RESOLVE) {
+            eventPublisher.publishEvent(new TicketResolvedEvent(ticketId));
+        }
 
         log.info("工单流转: id={}, {} --{}--> {}", ticketId, from.getDesc(), event.getDesc(), transition.to().getDesc());
         return ticket;
