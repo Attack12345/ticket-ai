@@ -40,16 +40,23 @@ request.interceptors.response.use(
         return Promise.reject(error)
       }
       config._retried = true
-      // 并发 401 只刷新一次
+      // 并发 401 只刷新一次；第一个触发刷新的请求自己重放，
+      // 刷新期间排队的请求由 waiters 统一唤醒（修复：原实现把首个请求的
+      // resolver 推入已被清空的 waiters，导致该请求永久挂死）
       if (!refreshing) {
         refreshing = true
         try {
-          const data = await axios.post('/api/v1/auth/refresh', {
+          const { data: res } = await axios.post('/api/v1/auth/refresh', {
             refreshToken: userStore.refreshToken
           })
-          userStore.setTokens(data.data.accessToken, data.data.refreshToken)
+          // 裸 axios 不经过业务码拆包，需校验 res.code
+          if (!res || res.code !== 200) {
+            throw new Error(res?.message || '刷新失败')
+          }
+          userStore.setTokens(res.data.accessToken, res.data.refreshToken)
           waiters.forEach(w => w(true))
           waiters = []
+          return request(config)
         } catch (e) {
           waiters.forEach(w => w(false))
           waiters = []

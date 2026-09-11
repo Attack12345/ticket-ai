@@ -50,7 +50,7 @@ public class DispatchServiceImpl implements DispatchService {
 
     /** 事务提交后异步触发（数据可见性保证） */
     @EventListener
-    @Async("dispatchExecutor")
+    @Async("coreExecutor")
     public void onTicketCreated(TicketCreatedEvent event) {
         dispatchAsync(event.ticket());
     }

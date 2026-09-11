@@ -21,6 +21,8 @@ import java.util.Map;
 /**
  * 自研 LLM 客户端（OpenAI 兼容协议，DEV_DOC §5.5.1）。
  * embed / chatJson 均记录 ai_usage_log（成功/失败必写）。
+ * LLM 慢/挂：单次调用上限取 LLM_SLA 与熔断硬上限的较小值；连续失败触发 LlmCircuitBreaker
+ * 熔断（打开期间立即抛 CIRCUIT_OPEN），既有降级链路（规则/兜底）照常生效，不拖垮调用方。
  */
 @Slf4j
 @Component
@@ -32,6 +34,7 @@ public class LlmClient {
             .build();
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final AiUsageLogMapper aiUsageLogMapper;
+    private final LlmCircuitBreaker llmCircuitBreaker;
 
     @Value("${app.llm.base-url}")
     private String baseUrl;
@@ -48,6 +51,10 @@ public class LlmClient {
     @Value("${app.llm.timeout-ms}")
     private long timeoutMs;
 
+    /** 熔断层超时硬上限（TimeLimiter 的轻量替代，仅压慢/挂的请求，可被 env 覆盖） */
+    @Value("${app.llm.circuit.timeout-ms:5000}")
+    private long circuitTimeoutMs;
+
     /**
      * 文本向量化。失败抛 LlmException（调用方降级为全文检索）。
      */
@@ -57,6 +64,12 @@ public class LlmClient {
             recordUsage(null, "EMBED", null, null, null, null, false, "LLM_API_KEY 未配置", start);
             throw new LlmException("LLM_API_KEY 未配置", LlmException.NO_KEY);
         }
+        // 熔断打开：立即降级，不让慢/挂的 LLM 拖累调用方
+        if (!llmCircuitBreaker.tryAcquire()) {
+            recordUsage(null, "EMBED", embedModel, null, null, null, false, "熔断打开，快速降级", start);
+            throw new LlmException("LLM 熔断打开，快速降级", LlmException.CIRCUIT_OPEN);
+        }
+        boolean ok = false;
         try {
             String body = objectMapper.writeValueAsString(
                     Map.of("model", embedModel, "input", List.of(text)));
@@ -64,7 +77,7 @@ public class LlmClient {
                     .uri(URI.create(baseUrl + "/embeddings"))
                     .header("Content-Type", "application/json")
                     .header("Authorization", "Bearer " + apiKey)
-                    .timeout(Duration.ofMillis(timeoutMs))
+                    .timeout(Duration.ofMillis(effectiveTimeout()))
                     .POST(HttpRequest.BodyPublishers.ofString(body))
                     .build();
             HttpResponse<String> response = httpClient.send(request,
@@ -85,6 +98,7 @@ public class LlmClient {
                     usage.path("prompt_tokens").asInt(-1),
                     usage.path("completion_tokens").asInt(0),
                     usage.path("total_tokens").asInt(-1), true, null, start);
+            ok = true;
             return vector;
         } catch (LlmException e) {
             throw e;
@@ -94,6 +108,13 @@ public class LlmClient {
         } catch (Exception e) {
             recordUsage(null, "EMBED", embedModel, null, null, null, false, e.getMessage(), start);
             throw new LlmException("embedding 调用异常: " + e.getMessage(), LlmException.SERVER_ERROR);
+        } finally {
+            // 成功复位失败窗口；失败（HTTP 错误/超时/解析异常）计入熔断
+            if (ok) {
+                llmCircuitBreaker.recordSuccess();
+            } else {
+                llmCircuitBreaker.recordFailure();
+            }
         }
     }
 
@@ -108,6 +129,12 @@ public class LlmClient {
             recordUsage(ticketId, scene, null, null, null, null, false, "LLM_API_KEY 未配置", start);
             throw new LlmException("LLM_API_KEY 未配置", LlmException.NO_KEY);
         }
+        // 熔断打开：立即降级，不让慢/挂的 LLM 拖累调用方
+        if (!llmCircuitBreaker.tryAcquire()) {
+            recordUsage(ticketId, scene, chatModel, null, null, null, false, "熔断打开，快速降级", start);
+            throw new LlmException("LLM 熔断打开，快速降级", LlmException.CIRCUIT_OPEN);
+        }
+        boolean ok = false;
         try {
             Map<String, Object> payload = Map.of(
                     "model", chatModel,
@@ -119,7 +146,7 @@ public class LlmClient {
                     .uri(URI.create(baseUrl + "/chat/completions"))
                     .header("Content-Type", "application/json")
                     .header("Authorization", "Bearer " + apiKey)
-                    .timeout(Duration.ofMillis(timeoutMs))
+                    .timeout(Duration.ofMillis(effectiveTimeout()))
                     .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(payload)))
                     .build();
             HttpResponse<String> response = httpClient.send(request,
@@ -138,6 +165,7 @@ public class LlmClient {
                     usage.path("total_tokens").asInt(-1), true, null, start);
             // 校验 JSON 合法性（非法抛 PARSE_ERROR，调用方降级）
             objectMapper.readTree(content);
+            ok = true;
             return content;
         } catch (LlmException e) {
             throw e;
@@ -147,7 +175,19 @@ public class LlmClient {
         } catch (Exception e) {
             recordUsage(ticketId, scene, chatModel, null, null, null, false, e.getMessage(), start);
             throw new LlmException("chat 调用异常: " + e.getMessage(), LlmException.SERVER_ERROR);
+        } finally {
+            // 成功复位失败窗口；失败（HTTP 错误/超时/解析异常）计入熔断
+            if (ok) {
+                llmCircuitBreaker.recordSuccess();
+            } else {
+                llmCircuitBreaker.recordFailure();
+            }
         }
+    }
+
+    /** 单次调用超时上限：取提供方 SLA 与熔断层硬上限的较小值，压住慢/挂请求 */
+    private long effectiveTimeout() {
+        return Math.min(timeoutMs, circuitTimeoutMs);
     }
 
     /** 记录 LLM 调用（DEV_DOC：每次调用必写 ai_usage_log） */

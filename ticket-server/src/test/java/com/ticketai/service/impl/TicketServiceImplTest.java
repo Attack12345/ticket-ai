@@ -1,5 +1,7 @@
 package com.ticketai.service.impl;
 
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.ticketai.common.PageResult;
 import com.ticketai.common.exception.BusinessException;
 import com.ticketai.common.exception.ErrorCode;
 import com.ticketai.common.util.TicketNoGenerator;
@@ -8,11 +10,13 @@ import com.ticketai.entity.TicketDO;
 import com.ticketai.entity.TicketStatusLogDO;
 import com.ticketai.mapper.TicketMapper;
 import com.ticketai.mapper.TicketStatusLogMapper;
+import com.ticketai.query.TicketQuery;
 import com.ticketai.security.LoginUser;
 import com.ticketai.security.UserContextHolder;
 import com.ticketai.service.SlaService;
 import com.ticketai.state.TicketEvent;
 import com.ticketai.state.TicketStatus;
+import com.ticketai.vo.TicketVO;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -54,6 +58,8 @@ class TicketServiceImplTest {
     @Mock
     private com.ticketai.mapper.TicketCommentMapper ticketCommentMapper;
     @Mock
+    private com.ticketai.service.AuditService auditService;
+    @Mock
     private org.springframework.context.ApplicationEventPublisher eventPublisher;
 
     private TicketServiceImpl ticketService;
@@ -61,7 +67,7 @@ class TicketServiceImplTest {
     @BeforeEach
     void setUp() {
         ticketService = new TicketServiceImpl(ticketMapper, ticketStatusLogMapper, ticketNoGenerator,
-                slaService, eventPublisher, redissonClient, agentMapper, ticketCommentMapper);
+                slaService, eventPublisher, redissonClient, agentMapper, ticketCommentMapper, auditService);
     }
 
     @AfterEach
@@ -80,6 +86,10 @@ class TicketServiceImplTest {
 
     private void loginAs(String username, String... permissions) {
         UserContextHolder.set(new LoginUser(1L, username, null, List.of(permissions)));
+    }
+
+    private void loginAsAgent(Long agentId, String username, String... permissions) {
+        UserContextHolder.set(new LoginUser(1L, username, agentId, List.of(permissions)));
     }
 
     @Test
@@ -200,5 +210,70 @@ class TicketServiceImplTest {
         TicketDO closed = ticketService.transition(1L, TicketEvent.CLOSE, 1L, "USER");
         assertNotNull(closed.getClosedAt());
         assertNotNull(closed.getResolvedAt(), "close 应保留 resolvedAt，仅 reopen 清空");
+    }
+
+    // ---------- P0-10 数据域与 PII 防护 ----------
+
+    @Test
+    @DisplayName("P0-10：坐席不能 RESOLVE 其他坐席负责的工单 → FORBIDDEN")
+    void agentCannotOperateOthersTicket() {
+        TicketDO processing = pendingAssignTicket(1L);
+        processing.setStatus(TicketStatus.PROCESSING.getCode());
+        processing.setAgentId(8L); // 负责人是别的坐席
+        when(ticketMapper.selectById(1L)).thenReturn(processing);
+        loginAsAgent(9L, "agent02", "ticket:resolve");
+
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> ticketService.transition(1L, TicketEvent.RESOLVE, 9L, "USER"));
+        assertEquals(ErrorCode.FORBIDDEN.getCode(), ex.getCode());
+    }
+
+    @Test
+    @DisplayName("P0-10：负责坐席可以 RESOLVE 自己的工单")
+    void ownerAgentCanOperateOwnTicket() {
+        TicketDO processing = pendingAssignTicket(1L);
+        processing.setStatus(TicketStatus.PROCESSING.getCode());
+        processing.setAgentId(9L);
+        when(ticketMapper.selectById(1L)).thenReturn(processing);
+        when(ticketMapper.update(any(), any())).thenReturn(1);
+        loginAsAgent(9L, "agent02", "ticket:resolve");
+
+        TicketDO result = ticketService.transition(1L, TicketEvent.RESOLVE, 9L, "USER");
+
+        assertEquals(TicketStatus.RESOLVED.getCode(), result.getStatus());
+    }
+
+    @Test
+    @DisplayName("P0-10：管理员（agent:manage）可以操作任何工单的 RESOLVE")
+    void adminCanOperateOthersTicket() {
+        TicketDO processing = pendingAssignTicket(1L);
+        processing.setStatus(TicketStatus.PROCESSING.getCode());
+        processing.setAgentId(8L);
+        when(ticketMapper.selectById(1L)).thenReturn(processing);
+        when(ticketMapper.update(any(), any())).thenReturn(1);
+        loginAs("admin", "ticket:resolve", "agent:manage");
+
+        TicketDO result = ticketService.transition(1L, TicketEvent.RESOLVE, 1L, "USER");
+
+        assertEquals(TicketStatus.RESOLVED.getCode(), result.getStatus());
+    }
+
+    @Test
+    @DisplayName("P0-10：列表对非管理员 customerContact 脱敏、管理员明文")
+    void contactMaskingByRole() {
+        TicketDO mine = pendingAssignTicket(1L);
+        mine.setAgentId(9L);
+        mine.setCustomerContact("13812345678");
+        Page<TicketDO> page = new Page<>(1, 10);
+        page.setRecords(List.of(mine));
+        when(ticketMapper.selectPage(any(), any())).thenReturn(page);
+
+        loginAsAgent(9L, "agent02", "ticket:view");
+        PageResult<TicketVO> agentResult = ticketService.pageList(new TicketQuery());
+        assertEquals("13******78", agentResult.getRecords().get(0).getCustomerContact(), "非管理员联系方式应脱敏");
+
+        loginAs("admin", "ticket:view", "agent:manage");
+        PageResult<TicketVO> adminResult = ticketService.pageList(new TicketQuery());
+        assertEquals("13812345678", adminResult.getRecords().get(0).getCustomerContact(), "管理员应见明文");
     }
 }

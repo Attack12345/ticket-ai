@@ -62,6 +62,7 @@ class SlaServiceImplTest {
         sla.setFirstResponseStatus(0);
         sla.setResolveStatus(0);
         sla.setEscalationTriggered(0);
+        sla.setVersion(0);
         return sla;
     }
 
@@ -93,6 +94,7 @@ class SlaServiceImplTest {
         TicketSlaDO sla = overdueSla(1L, 10L);
         when(ticketSlaMapper.selectById(1L)).thenReturn(sla);
         when(ticketMapper.selectById(10L)).thenReturn(pendingTicket(10L));
+        when(ticketSlaMapper.update(any(), any())).thenReturn(1);
 
         newService().handleDelayCheck(new SlaMessage(10L, 1L, SlaMessage.TYPE_FIRST_RESPONSE, LocalDateTime.now()));
 
@@ -125,10 +127,44 @@ class SlaServiceImplTest {
         when(ticketSlaMapper.selectList(any())).thenReturn(java.util.List.of(sla));
         when(ticketSlaMapper.selectById(1L)).thenReturn(sla);
         when(ticketMapper.selectById(10L)).thenReturn(pendingTicket(10L));
+        when(ticketSlaMapper.update(any(), any())).thenReturn(1);
 
         newService().compensate();
 
         verify(eventPublisher).publishEvent(any(SlaTimeoutEvent.class));
+    }
+
+    @Test
+    @DisplayName("P0-4 回归：已解决(无 TIMEOUT_ESCALATE)工单超期，升级只标记不触发状态机，不毒化批次")
+    void compensateOnIllegalStateOnlyMarksNotEscalates() {
+        TicketSlaDO sla = overdueSla(1L, 10L);
+        TicketDO resolved = pendingTicket(10L);
+        resolved.setStatus(5); // RESOLVED：状态机未注册 TIMEOUT_ESCALATE
+        when(ticketSlaMapper.selectList(any())).thenReturn(java.util.List.of(sla));
+        when(ticketSlaMapper.selectById(1L)).thenReturn(sla);
+        when(ticketMapper.selectById(10L)).thenReturn(resolved);
+        when(ticketSlaMapper.update(any(), any())).thenReturn(1);
+
+        newService().compensate();
+
+        // 升级被标记（脏 SLA 行退出扫描集合），但不触发状态机事件（不抛 ILLEGAL_TRANSITION）
+        assertEquals(1, sla.getEscalationTriggered());
+        assertNotNull(sla.getEscalatedAt());
+        verify(eventPublisher, never()).publishEvent(any());
+    }
+
+    @Test
+    @DisplayName("P0-4 回归：终止结算（未回复即解决）后，补偿扫描不再捞出该 SLA")
+    void settleOnClosedClearsDirtySla() {
+        TicketSlaDO sla = overdueSla(1L, 10L); // firstResponseStatus=0, deadline 已过
+        when(ticketSlaMapper.selectOne(any())).thenReturn(sla);
+        when(ticketSlaMapper.update(any(), any())).thenReturn(1);
+
+        newService().settleOnClosed(10L);
+
+        // 首响指标按超时结算为 2，避免补偿扫描（first_response_status=0 条件）继续捞取
+        assertEquals(2, sla.getFirstResponseStatus());
+        verify(eventPublisher, never()).publishEvent(any());
     }
 
     @Test

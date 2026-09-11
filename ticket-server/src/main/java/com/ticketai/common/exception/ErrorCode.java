@@ -16,7 +16,8 @@ public enum ErrorCode {
     ILLEGAL_TRANSITION(409, "非法的工单状态流转"),
     DUPLICATE_MESSAGE(409, "渠道消息重复"),
     SYSTEM_ERROR(500, "系统异常，请稍后重试"),
-    AI_UNAVAILABLE(503, "AI 服务暂不可用");
+    AI_UNAVAILABLE(503, "AI 服务暂不可用"),
+    RATE_LIMITED(429, "请求过于频繁，请稍后再试");
 
     private final int code;
     private final String message;

@@ -1,6 +1,7 @@
 package com.ticketai.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.ticketai.entity.TicketDO;
 import com.ticketai.entity.TicketSlaDO;
 import com.ticketai.mapper.TicketMapper;
@@ -13,13 +14,12 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
- * 看板统计服务（DEV_DOC §6.5）。
+ * 看板统计服务（DEV_DOC §6.5）。指标全部下沉 SQL 层聚合，杜绝全表入内存（P1-7）。
  */
 @Slf4j
 @Service
@@ -33,44 +33,53 @@ public class DashboardServiceImpl implements DashboardService {
     public DashboardStatsVO stats() {
         DashboardStatsVO vo = new DashboardStatsVO();
 
-        // 1. 各状态工单数
-        List<TicketDO> allTickets = ticketMapper.selectList(null);
-        Map<Integer, Long> byStatus = allTickets.stream()
-                .collect(Collectors.groupingBy(TicketDO::getStatus, Collectors.counting()));
-        vo.setTotalByStatus(byStatus);
+        // 1. 各状态工单数：GROUP BY 聚合，代替全表拉取后流式分组
+        vo.setTotalByStatus(countByStatus());
 
-        // 2. SLA 按时率：已结算（响应状态 1/2 或解决状态 1/2）中按时占比
-        List<TicketSlaDO> settled = ticketSlaMapper.selectList(new LambdaQueryWrapper<TicketSlaDO>()
+        // 2. SLA 按时率：已结算（响应/解决状态为 1/2）中按时占比，条件 count 代替遍历
+        long settled = ticketSlaMapper.selectCount(new LambdaQueryWrapper<TicketSlaDO>()
                 .and(w -> w.eq(TicketSlaDO::getFirstResponseStatus, 1)
                         .or().eq(TicketSlaDO::getFirstResponseStatus, 2)
                         .or().eq(TicketSlaDO::getResolveStatus, 1)
                         .or().eq(TicketSlaDO::getResolveStatus, 2)));
-        long onTime = settled.stream()
-                .filter(s -> s.getFirstResponseStatus() == 1 || s.getResolveStatus() == 1)
-                .count();
-        vo.setSlaOnTimeRate(settled.isEmpty() ? null : (double) onTime / settled.size());
+        long onTime = ticketSlaMapper.selectCount(new LambdaQueryWrapper<TicketSlaDO>()
+                .and(w -> w.eq(TicketSlaDO::getFirstResponseStatus, 1)
+                        .or().eq(TicketSlaDO::getResolveStatus, 1)));
+        vo.setSlaOnTimeRate(settled == 0 ? null : (double) onTime / settled);
 
-        // 3. 平均首次响应时长（分钟）：有首次响应时间的工单
-        List<TicketDO> responded = allTickets.stream()
-                .filter(t -> t.getFirstRespondedAt() != null && t.getCreateTime() != null)
-                .toList();
-        if (responded.isEmpty()) {
-            vo.setAvgFirstResponseMinutes(null);
-        } else {
-            double avgMinutes = responded.stream()
-                    .mapToLong(t -> ChronoUnit.MINUTES.between(t.getCreateTime(), t.getFirstRespondedAt()))
-                    .average().orElse(0);
-            vo.setAvgFirstResponseMinutes(Math.round(avgMinutes * 10) / 10.0);
-        }
+        // 3. 平均首次响应时长（分钟）：AVG(TIMESTAMPDIFF) 由 DB 聚合
+        vo.setAvgFirstResponseMinutes(avgFirstResponseMinutes());
 
-        // 4. 今日新增/解决
+        // 4. 今日新增/解决：条件 count（NULL 时间自然被排除）
         LocalDateTime dayStart = LocalDate.now().atStartOfDay();
-        vo.setTodayNew(allTickets.stream()
-                .filter(t -> t.getCreateTime() != null && !t.getCreateTime().isBefore(dayStart))
-                .count());
-        vo.setTodayResolved(allTickets.stream()
-                .filter(t -> t.getResolvedAt() != null && !t.getResolvedAt().isBefore(dayStart))
-                .count());
+        vo.setTodayNew(ticketMapper.selectCount(new LambdaQueryWrapper<TicketDO>()
+                .ge(TicketDO::getCreateTime, dayStart)));
+        vo.setTodayResolved(ticketMapper.selectCount(new LambdaQueryWrapper<TicketDO>()
+                .ge(TicketDO::getResolvedAt, dayStart)));
         return vo;
+    }
+
+    /** 按状态分组计数（无工单返回空 Map，key=status code, value=数量） */
+    private Map<Integer, Long> countByStatus() {
+        return ticketMapper.selectMaps(new QueryWrapper<TicketDO>()
+                        .select("status", "COUNT(*) AS cnt")
+                        .groupBy("status"))
+                .stream()
+                .collect(Collectors.toMap(
+                        row -> ((Number) row.get("status")).intValue(),
+                        row -> ((Number) row.get("cnt")).longValue()));
+    }
+
+    /** 首次响应均长（分钟，保留 1 位小数）；无首次响应记录返回 null */
+    private Double avgFirstResponseMinutes() {
+        List<Map<String, Object>> rows = ticketMapper.selectMaps(new QueryWrapper<TicketDO>()
+                .select("AVG(TIMESTAMPDIFF(MINUTE, create_time, first_responded_at)) AS avgMin")
+                .isNotNull("create_time")
+                .isNotNull("first_responded_at"));
+        if (rows.isEmpty() || rows.get(0).get("avgMin") == null) {
+            return null;
+        }
+        double avgMin = ((Number) rows.get(0).get("avgMin")).doubleValue();
+        return Math.round(avgMin * 10) / 10.0;
     }
 }

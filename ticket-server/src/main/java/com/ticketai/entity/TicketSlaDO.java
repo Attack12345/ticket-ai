@@ -42,6 +42,14 @@ public class TicketSlaDO {
 
     private LocalDateTime escalatedAt;
 
+    /**
+     * 乐观锁版本号。注意：MP 3.5.x 的 @Version 拦截器在 version=0 实体更新路径有
+     * 参数注入缺陷（见 DEV_DOC §4.2.1），升级/结算统一改用显式 UpdateWrapper
+     * 拼接 version 条件，本字段仅作映射载体，不依赖拦截器。
+     */
+    @com.baomidou.mybatisplus.annotation.Version
+    private Integer version;
+
     private LocalDateTime createTime;
 
     private LocalDateTime updateTime;

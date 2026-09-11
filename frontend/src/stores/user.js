@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia'
+import axios from 'axios'
 
 // 用户会话（DEV_DOC §7.2：token + 权限码）
 export const useUserStore = defineStore('user', {
@@ -22,6 +23,8 @@ export const useUserStore = defineStore('user', {
       localStorage.setItem('permissions', JSON.stringify(this.permissions || []))
     },
     logout() {
+      const accessToken = this.accessToken
+      const refreshToken = this.refreshToken
       this.accessToken = ''
       this.refreshToken = ''
       this.username = ''
@@ -30,6 +33,13 @@ export const useUserStore = defineStore('user', {
       localStorage.removeItem('refreshToken')
       localStorage.removeItem('username')
       localStorage.removeItem('permissions')
+      // P0-7：尽力通知服务端吊销令牌（不入 request 拦截器，避免循环依赖；
+      // 失败不阻断本地登出，过期/失效由服务端幂等忽略）
+      if (refreshToken) {
+        axios.post('/api/v1/auth/logout', { refreshToken }, {
+          headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {}
+        }).catch(() => {})
+      }
     },
     hasPermission(code) {
       return this.permissions.includes(code)

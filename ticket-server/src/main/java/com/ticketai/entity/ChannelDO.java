@@ -26,6 +26,9 @@ public class ChannelDO {
     /** 渠道配置 JSON（如邮件 IMAP 参数） */
     private String configJson;
 
+    /** 渠道接入凭证（Authorization: Bearer <appKey>；WEB_API 渠道必填，生产必须随机化） */
+    private String appKey;
+
     /** 状态：0-禁用 1-启用 */
     private Integer status;
 

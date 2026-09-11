@@ -10,6 +10,7 @@ import com.ticketai.mapper.TicketMapper;
 import com.ticketai.mapper.TicketStatusLogMapper;
 import com.ticketai.security.LoginUser;
 import com.ticketai.security.UserContextHolder;
+import com.ticketai.service.AuditService;
 import com.ticketai.state.TicketStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
@@ -48,6 +49,8 @@ class TicketClaimConcurrentTest {
     private AgentMapper agentMapper;
     @Mock
     private RedissonClient redissonClient;
+    @Mock
+    private AuditService auditService;
 
     @AfterEach
     void tearDown() {
@@ -74,7 +77,7 @@ class TicketClaimConcurrentTest {
         AtomicInteger conflict = new AtomicInteger();
 
         TicketServiceImpl service = new TicketServiceImpl(ticketMapper, ticketStatusLogMapper, null,
-                null, null, redissonClient, agentMapper, null);
+                null, null, redissonClient, agentMapper, null, auditService);
         for (int i = 0; i < threads; i++) {
             pool.submit(() -> {
                 UserContextHolder.set(new LoginUser(2L, "agent01", 100L, List.of("ticket:claim")));

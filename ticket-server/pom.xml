@@ -115,6 +115,14 @@
             <optional>true</optional>
         </dependency>
 
+        <!-- .env 文件加载（本地配置统一入口，见 ticket-server/.env.example；
+             生产仍用系统环境变量/密管注入，.env 缺省时不妨碍启动） -->
+        <dependency>
+            <groupId>me.paulschwarz</groupId>
+            <artifactId>spring-dotenv</artifactId>
+            <version>4.0.0</version>
+        </dependency>
+
         <!-- 测试 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

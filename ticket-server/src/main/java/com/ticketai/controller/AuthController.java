@@ -11,6 +11,7 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -32,5 +33,14 @@ public class AuthController {
     @Operation(summary = "刷新 token（旋转）")
     public Result<LoginVO> refresh(@RequestBody @Valid RefreshDTO dto) {
         return Result.ok(authService.refresh(dto));
+    }
+
+    @PostMapping("/logout")
+    @Operation(summary = "登出：吊销 access token + 删除 refresh token（幂等）")
+    public Result<Void> logout(
+            @RequestHeader(value = "Authorization", required = false) String authorization,
+            @RequestBody(required = false) RefreshDTO dto) {
+        authService.logout(authorization, dto);
+        return Result.ok(null);
     }
 }

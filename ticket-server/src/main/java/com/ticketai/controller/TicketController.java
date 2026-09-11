@@ -138,8 +138,8 @@ public class TicketController {
     }
 
     @PostMapping("/{id}/accept-category")
-    @PreAuthorize("hasAuthority('ticket:view')")
-    @Operation(summary = "采纳 AI 分类")
+    @PreAuthorize("hasAuthority('ticket:edit')")
+    @Operation(summary = "采纳 AI 分类（P1-3：从 ticket:view 收窄为 ticket:edit）")
     public Result<Void> acceptCategory(@PathVariable Long id, @RequestBody @Valid AcceptCategoryDTO dto) {
         ticketService.acceptCategory(id, dto);
         return Result.ok();

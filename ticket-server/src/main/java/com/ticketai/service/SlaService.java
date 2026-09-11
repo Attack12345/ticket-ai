@@ -15,4 +15,11 @@ public interface SlaService {
 
     /** 补偿扫描：兜底超时未升级的工单（消息丢失场景） */
     void compensate();
+
+    /**
+     * 工单进入 RESOLVED / CLOSED / CANCELLED 终止态时结算 SLA：
+     * 未结算的响应/解决指标按 deadline 是否已过结算为按时(1)/超时(2)，
+     * 避免产生"未回复即解决/取消"的脏 SLA 行被补偿扫描永久捞取（docs/…/P0-4）。
+     */
+    void settleOnClosed(Long ticketId);
 }

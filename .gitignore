@@ -1,6 +1,11 @@
 .idea/
 *.iml
 node_modules/
-.env
 *.log
 dist/
+# 环境变量文件含本机口令/密钥，禁止入库；.env.example 作为模板保留
+**/.env*
+!**/.env.example
+# 本地环境配置可含口令/密钥，禁止入库（已跟踪则先 git rm --cached）
+**/application-dev.yml
+**/application-local.yml

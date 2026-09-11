@@ -16,15 +16,19 @@ import com.ticketai.service.TicketService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 渠道服务（DEV_DOC §4.2.3 / §6.4）。
  * 幂等创建：message_no 唯一键 + 并发冲突时查回已建工单。
+ * P0-2：公开接口增加 appKey 凭证校验 + Redis 固定窗口限流。
  */
 @Slf4j
 @Service
@@ -32,11 +36,62 @@ import java.util.Map;
 public class ChannelServiceImpl implements ChannelService {
 
     private static final String WEB_API_CODE = "WEB_API";
+    private static final String BEARER_PREFIX = "Bearer ";
+    /** 单渠道每分钟最大请求数 */
+    private static final long RATE_WINDOW_MAX = 600;
+    /** 固定窗口秒数（+1 秒补偿分钟边界） */
+    private static final long RATE_WINDOW_SECONDS = 61;
 
     private final ChannelMapper channelMapper;
     private final ChannelMessageMapper channelMessageMapper;
     private final TicketService ticketService;
     private final TicketMapper ticketMapper;
+    private final StringRedisTemplate stringRedisTemplate;
+
+    @Override
+    public void assertWebApiRequest(String authorization) {
+        String token = extractBearerToken(authorization);
+        if (token == null || token.isBlank()) {
+            throw new BusinessException(ErrorCode.UNAUTHORIZED,
+                    "渠道凭证缺失：请求头需携带 Authorization: Bearer <渠道appKey>");
+        }
+        ChannelDO channel = channelMapper.selectOne(new LambdaQueryWrapper<ChannelDO>()
+                .eq(ChannelDO::getCode, WEB_API_CODE)
+                .eq(ChannelDO::getStatus, 1)
+                .eq(ChannelDO::getAppKey, token));
+        if (channel == null) {
+            throw new BusinessException(ErrorCode.UNAUTHORIZED, "渠道凭证无效或渠道未启用");
+        }
+        rateLimit(channel.getId());
+    }
+
+    private String extractBearerToken(String authorization) {
+        if (authorization == null || !authorization.startsWith(BEARER_PREFIX)) {
+            return null;
+        }
+        String token = authorization.substring(BEARER_PREFIX.length()).trim();
+        return token.isEmpty() ? null : token;
+    }
+
+    /** Redis 固定窗口限流（每渠道每分钟）；Redis 不可用时放行并告警（限流是加固不是可用性红线） */
+    private void rateLimit(Long channelId) {
+        String window = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMddHHmm"));
+        String key = "channel:web-api:rate:" + channelId + ":" + window;
+        try {
+            Long count = stringRedisTemplate.opsForValue().increment(key);
+            if (count != null && count == 1) {
+                // Redis 3.0 兼容：避免用 expire(K, Duration) 默认方法（invoke-mutual 栈溢出坑，见 DEV_DOC §0.5.2）
+                stringRedisTemplate.expire(key, RATE_WINDOW_SECONDS, TimeUnit.SECONDS);
+            }
+            if (count != null && count > RATE_WINDOW_MAX) {
+                throw new BusinessException(ErrorCode.RATE_LIMITED, "请求过于频繁，请稍后再试");
+            }
+        } catch (BusinessException e) {
+            throw e;
+        } catch (Exception e) {
+            log.error("渠道限流异常（放行请求）: channelId={}", channelId, e);
+        }
+    }
 
     @Override
     @Transactional(rollbackFor = Exception.class)

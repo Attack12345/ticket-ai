@@ -35,6 +35,9 @@ public class SecurityConfig {
     private static final String[] WHITELIST = {
             "/api/v1/auth/login",
             "/api/v1/auth/refresh",
+            // P0-7：登出必须匿名可达——access token 已过期时仍能删除自身 refresh token
+            // （服务端幂等，无 token / 无效 token 均为 no-op，删除需持有真实 refresh token）
+            "/api/v1/auth/logout",
             "/api/v1/channels/web-api/tickets",
             "/doc.html",
             "/swagger-ui/**",
@@ -58,6 +61,18 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers(WHITELIST).permitAll()
                         .anyRequest().authenticated())
+                // P1-11：安全响应头（HSTS / X-Frame-Options / CSP / 防嗅探）
+                .headers(headers -> headers
+                        .httpStrictTransportSecurity(hsts -> hsts
+                                .includeSubDomains(true)
+                                .preload(true)
+                                .maxAgeInSeconds(31536000))
+                        .frameOptions(xfo -> xfo.sameOrigin())
+                        .contentTypeOptions(contentType -> contentType.disable())
+                        .contentSecurityPolicy(csp -> csp.policyDirectives(
+                                "default-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"))
+                        .referrerPolicy(referrer -> referrer.policy(
+                                org.springframework.security.web.header.writers.ReferrerPolicyHeaderWriter.ReferrerPolicy.NO_REFERRER)))
                 .exceptionHandling(eh -> eh
                         .authenticationEntryPoint((request, response, ex) -> {
                             response.setStatus(401);

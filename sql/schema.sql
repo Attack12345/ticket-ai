@@ -91,6 +91,7 @@ CREATE TABLE `channel` (
   `code`        varchar(30) NOT NULL COMMENT '渠道编码：WEB_API-网页接口 EMAIL-邮件',
   `name`        varchar(50) NOT NULL COMMENT '渠道名',
   `config_json` json        DEFAULT NULL COMMENT '渠道配置（如邮件IMAP参数）',
+  `app_key`     varchar(128) DEFAULT NULL COMMENT '渠道接入凭证（Authorization: Bearer <app_key>）。生产必须替换为随机值，禁用手册中的演示值',
   `status`      tinyint     NOT NULL DEFAULT 1 COMMENT '状态：0-禁用 1-启用',
   `create_by`   varchar(64)  DEFAULT NULL COMMENT '创建人',
   `create_time` datetime    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
@@ -238,6 +239,7 @@ CREATE TABLE `ticket_sla` (
   `resolve_status`         tinyint NOT NULL DEFAULT 0 COMMENT '解决状态：0-未到期 1-按时 2-超时',
   `escalation_triggered`   tinyint NOT NULL DEFAULT 0 COMMENT '是否已触发升级：0-否 1-是',
   `escalated_at`           datetime DEFAULT NULL COMMENT '升级时间',
+  `version`                int NOT NULL DEFAULT 0 COMMENT '乐观锁版本号（升级与结算用原子比较）',
   `create_time`            datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `update_time`            datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (`id`),
@@ -399,6 +401,7 @@ INSERT INTO `sys_permission` (`code`, `name`, `type`) VALUES
 ('ticket:resolve', '解决工单', 'BUTTON'),
 ('ticket:close', '关闭工单', 'BUTTON'),
 ('ticket:escalate', '升级工单', 'BUTTON'),
+('ticket:edit', '修改工单（采纳分类等）', 'BUTTON'),
 ('sla:manage', '管理SLA策略', 'BUTTON'),
 ('kb:manage', '管理知识库', 'BUTTON'),
 ('agent:manage', '管理坐席', 'BUTTON'),
@@ -421,10 +424,10 @@ INSERT INTO `sla_policy` (`name`, `priority`, `first_response_minutes`, `resolve
 ('中',   3, 120, 1440, 1, '{"notifyGroupId":1}'),
 ('低',   4, 480, 2880, 0, NULL);
 
--- 默认渠道
-INSERT INTO `channel` (`code`, `name`, `status`) VALUES
-('WEB_API', '网页接口', 1),
-('EMAIL', '邮件', 0);
+-- 默认渠道（app_key 为演示值，生产必须替换为随机值）
+INSERT INTO `channel` (`code`, `name`, `status`, `app_key`) VALUES
+('WEB_API', '网页接口', 1, 'dev-channel-key-change-me'),
+('EMAIL', '邮件', 0, NULL);
 
 -- 默认技能组与演示坐席（M2 里程碑执行，账号 admin/agent01，密码均为 Admin@12345，启动时初始化）
 INSERT INTO `skill_group` (`name`, `description`, `status`) VALUES

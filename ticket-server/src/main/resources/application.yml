@@ -11,6 +11,12 @@ spring:
   jackson:
     time-zone: Asia/Shanghai
     date-format: yyyy-MM-dd HH:mm:ss
+  # P1-1：加载本地 .env（gitignored）作为环境变量来源；缺失/未配置时全部回落到默认值
+  dotenv:
+    enabled: true
+    location: .env
+    ignoreIfMissing: true
+    quiet: true
 
 mybatis-plus:
   configuration:
@@ -30,24 +36,32 @@ springdoc:
     path: /swagger-ui.html
 
 rocketmq:
-  name-server: 127.0.0.1:9876
+  name-server: ${ROCKETMQ_NAMESRV:127.0.0.1:9876}
   producer:
     group: ticket-sla-producer
 
 app:
   jwt:
-    secret: ticket-ai-dev-secret-key-change-me-in-production-0123456789abcdef
-    access-expire-minutes: 30
-    refresh-expire-days: 7
+    # 生产必须通过 JWT_SECRET 环境变量注入（或 .env），且长度 ≥ 32 字符；严禁内置默认值
+    secret: ${JWT_SECRET:}
+    access-expire-minutes: ${JWT_ACCESS_EXPIRE_MINUTES:30}
+    refresh-expire-days: ${JWT_REFRESH_EXPIRE_DAYS:7}
   llm:
     base-url: ${LLM_BASE_URL:http://127.0.0.1:8000/v1}
     api-key: ${LLM_API_KEY:}
     chat-model: ${LLM_CHAT_MODEL:gpt-4o-mini}
     embed-model: ${LLM_EMBED_MODEL:text-embedding-3-small}
     embed-dims: 1536
-    timeout-ms: 15000
+    timeout-ms: ${LLM_TIMEOUT_MS:15000}
+    # P1-5 熔断（LlmCircuitBreaker，无外部依赖）：LLM 连续失败 N 次熔断 T 秒，
+    # 打开期间 AI 链路立即降级（不阻塞调用方）；prod 未覆盖时同样生效
+    circuit:
+      timeout-ms: ${LLM_CIRCUIT_TIMEOUT_MS:5000}          # 单次 HTTP 调用硬上限（TimeLimiter 轻量替代）
+      failure-threshold: ${LLM_CIRCUIT_FAILURE_THRESHOLD:5}   # 窗口内连续失败 N 次即熔断
+      window-ms: ${LLM_CIRCUIT_WINDOW_MS:10000}           # 失败统计窗口
+      open-ms: ${LLM_CIRCUIT_OPEN_MS:30000}               # 熔断保持时长，期满放行一个探测请求
   es:
-    uris: http://127.0.0.1:9200
+    uris: ${ES_URIS:http://127.0.0.1:9200}
   sla:
     compensation-cron: "0 */5 * * * ?"
 

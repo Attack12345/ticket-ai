@@ -1,0 +1,55 @@
+# 生产环境配置（P0-6，docs/enterprise-production-gaps.md）
+# 启动方式：java -jar ticket-server.jar --spring.profiles.active=prod
+# 所有敏感项与中间件地址一律通过环境变量/密管注入，缺失即启动失败（fail-fast）。
+spring:
+  datasource:
+    url: ${MYSQL_URL:}
+    username: ${MYSQL_USERNAME:}
+    password: ${MYSQL_PASSWORD:}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  data:
+    redis:
+      host: ${REDIS_HOST:}
+      port: ${REDIS_PORT:6379}
+
+# 生产关闭 API 文档暴露面
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
+
+# 生产关闭 SQL 日志（StdOutImpl），避免业务参数/口令入日志
+mybatis-plus:
+  configuration:
+    log-impl: org.apache.ibatis.logging.nologging.NoLoggingImpl
+
+rocketmq:
+  name-server: ${ROCKETMQ_NAMESRV:}
+  producer:
+    group: ticket-sla-producer
+
+app:
+  # 生产禁止播种演示账号（admin/agent01 会留下永久后门），务必显式关闭
+  init:
+    seed-demo-accounts: ${SEED_DEMO_ACCOUNTS:false}
+  jwt:
+    # 必须由 JWT_SECRET 注入（长度 ≥ 32 字符，否则 JwtTokenProvider 拒绝启动）
+    secret: ${JWT_SECRET:}
+    access-expire-minutes: ${JWT_ACCESS_EXPIRE_MINUTES:30}
+    refresh-expire-days: ${JWT_REFRESH_EXPIRE_DAYS:7}
+  llm:
+    base-url: ${LLM_BASE_URL:}
+    api-key: ${LLM_API_KEY:}
+    chat-model: ${LLM_CHAT_MODEL:gpt-4o-mini}
+    embed-model: ${LLM_EMBED_MODEL:text-embedding-3-small}
+    embed-dims: 1536
+    timeout-ms: ${LLM_TIMEOUT_MS:15000}
+  es:
+    uris: ${ES_URIS:}
+  sla:
+    compensation-cron: "0 */5 * * * ?"
+
+logging:
+  level:
+    com.ticketai: info

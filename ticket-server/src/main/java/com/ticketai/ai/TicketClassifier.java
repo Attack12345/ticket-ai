@@ -33,7 +33,7 @@ public class TicketClassifier {
     private final ObjectMapper objectMapper;
 
     @EventListener
-    @Async("dispatchExecutor")
+    @Async("aiExecutor")
     public void onTicketCreated(TicketCreatedEvent event) {
         TicketDO ticket = event.ticket();
         // 幂等防重：SETNX 成功才执行（LLM 调用有成本）

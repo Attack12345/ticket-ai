@@ -24,6 +24,7 @@ import com.ticketai.security.UserContextHolder;
 import com.ticketai.event.SlaTimeoutEvent;
 import com.ticketai.event.TicketCreatedEvent;
 import com.ticketai.event.TicketResolvedEvent;
+import com.ticketai.service.AuditService;
 import com.ticketai.service.SlaService;
 import com.ticketai.service.TicketService;
 import com.ticketai.state.StateMachine;
@@ -64,6 +65,7 @@ public class TicketServiceImpl implements TicketService {
     private final RedissonClient redissonClient;
     private final AgentMapper agentMapper;
     private final TicketCommentMapper ticketCommentMapper;
+    private final AuditService auditService;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -166,6 +168,9 @@ public class TicketServiceImpl implements TicketService {
             ticket.setVersion(ticket.getVersion() + 1);
             ticket.setUpdateTime(now);
             log.info("坐席抢单成功: ticketId={}, agentId={}", ticketId, user.getAgentId());
+            // P1-9：抢单审计
+            auditService.record("TICKET_CLAIM", "TICKET", ticketId, user.getUsername(),
+                    "{\"ticketNo\":\"" + ticket.getTicketNo() + "\"}");
             return ticket;
         } finally {
             lock.unlock();
@@ -193,14 +198,25 @@ public class TicketServiceImpl implements TicketService {
 
     @Override
     public void acceptCategory(Long ticketId, AcceptCategoryDTO dto) {
-        requireTicket(ticketId);
+        TicketDO ticket = requireTicket(ticketId);
+        // P0-10：非管理员只能采纳自己负责工单的分类（配合端点上方的 ticket:edit 权限）
+        assertOwnership(ticket);
+        // P1-3：乐观锁条件更新，防止并发覆盖他人对同一工单的修改
         UpdateWrapper<TicketDO> update = new UpdateWrapper<TicketDO>()
                 .eq("id", ticketId)
+                .eq("version", ticket.getVersion())
                 .set("category", dto.getCategory())
                 .set("priority", dto.getPriority())
+                .set("version", ticket.getVersion() + 1)
                 .set("update_time", LocalDateTime.now());
-        ticketMapper.update(null, update);
+        int rows = ticketMapper.update(null, update);
+        if (rows == 0) {
+            throw new BusinessException(ErrorCode.CONCURRENT_MODIFY, "工单已被他人修改，请刷新后重试");
+        }
         log.info("采纳分类: ticketId={}, category={}, priority={}", ticketId, dto.getCategory(), dto.getPriority());
+        // P1-9：采纳分类审计
+        auditService.record("TICKET_ACCEPT_CATEGORY", "TICKET", ticketId, currentUsername(),
+                "{\"category\":\"" + dto.getCategory() + "\",\"priority\":" + dto.getPriority() + "}");
     }
 
     @Override
@@ -218,6 +234,16 @@ public class TicketServiceImpl implements TicketService {
                         .like(TicketDO::getTitle, query.getKeyword())
                         .or()
                         .like(TicketDO::getDescription, query.getKeyword()));
+        // P0-10：数据域隔离。非管理员只见「未分配可抢」+「分配给我」的工单
+        LoginUser user = UserContextHolder.get();
+        if (user != null && !isAdmin(user)) {
+            Long agentId = user.getAgentId();
+            if (agentId != null) {
+                wrapper.and(w -> w.isNull(TicketDO::getAgentId).or().eq(TicketDO::getAgentId, agentId));
+            } else {
+                wrapper.isNull(TicketDO::getAgentId);
+            }
+        }
         applySort(wrapper, query.getSort());
 
         Page<TicketDO> page = ticketMapper.selectPage(query.toPage(), wrapper);
@@ -227,7 +253,9 @@ public class TicketServiceImpl implements TicketService {
 
     @Override
     public TicketVO getDetail(Long id) {
-        return toVO(requireTicket(id));
+        TicketDO ticket = requireTicket(id);
+        assertViewScope(ticket);
+        return toVO(ticket);
     }
 
     @Override
@@ -253,6 +281,8 @@ public class TicketServiceImpl implements TicketService {
         // 2. 权限校验（SYSTEM 事件仅系统内部触发，跳过用户权限检查）
         if (!transition.isSystemOnly()) {
             checkPermission(transition.requiredPermission());
+            // P0-10 越权防线：非管理员的坐席不得操作其他坐席负责的工单
+            assertOwnership(ticket);
         }
 
         // 3. 乐观锁更新：显式 WHERE version + 状态双条件（MP @Version 拦截器在
@@ -311,6 +341,18 @@ public class TicketServiceImpl implements TicketService {
         // 4. 状态日志
         writeStatusLog(ticketId, from, transition.to(), event, operatorId, operatorType, null);
 
+        // SLA 终止结算（RESOLVED/CLOSED/CANCELLED）：结算未响应/未解决指标，
+        // 避免"未回复即解决/取消"的脏 SLA 行被补偿扫描反复捞取造成升级停摆（见 docs P0-4）
+        if (event == TicketEvent.RESOLVE || event == TicketEvent.CLOSE || event == TicketEvent.CANCEL) {
+            slaService.settleOnClosed(ticketId);
+        }
+
+        // P1-9：用户触发的状态流转落审计（SYSTEM 事件由系统内部触发，不记 operator）
+        if (!transition.isSystemOnly()) {
+            auditService.record("TICKET_" + event.name(), "TICKET", ticketId, currentUsername(),
+                    "{\"from\":" + from.getCode() + ",\"to\":" + transition.to().getCode() + "}");
+        }
+
         // 已解决 → 发布事件（异步写相似工单索引，供 AI 回复建议召回）
         if (event == TicketEvent.RESOLVE) {
             eventPublisher.publishEvent(new TicketResolvedEvent(ticketId));
@@ -322,7 +364,8 @@ public class TicketServiceImpl implements TicketService {
 
     @Override
     public List<TicketStatusLogVO> timeline(Long ticketId) {
-        requireTicket(ticketId);
+        TicketDO ticket = requireTicket(ticketId);
+        assertViewScope(ticket);
         return ticketStatusLogMapper.selectList(new LambdaQueryWrapper<TicketStatusLogDO>()
                         .eq(TicketStatusLogDO::getTicketId, ticketId)
                         .orderByAsc(TicketStatusLogDO::getCreateTime)).stream()
@@ -344,6 +387,55 @@ public class TicketServiceImpl implements TicketService {
         if (user == null || user.getPermissions() == null || !user.getPermissions().contains(permission)) {
             throw new BusinessException(ErrorCode.FORBIDDEN, "缺少权限: " + permission);
         }
+    }
+
+    // ---------- P0-10 数据域与 PII 防护 ----------
+
+    /** 管理员判定：ADMIN 角色绑定 agent:manage（DataInitializer 中 AGENT 不绑定该码） */
+    private boolean isAdmin(LoginUser user) {
+        return user != null && user.getPermissions() != null && user.getPermissions().contains("agent:manage");
+    }
+
+    /** 操作越权防线：非管理员的坐席不得操作已分配给其他坐席的工单；未分配工单不限制 */
+    private void assertOwnership(TicketDO ticket) {
+        LoginUser user = UserContextHolder.get();
+        if (user == null || isAdmin(user)) {
+            return;
+        }
+        Long agentId = user.getAgentId();
+        if (agentId != null && ticket.getAgentId() != null && !agentId.equals(ticket.getAgentId())) {
+            throw new BusinessException(ErrorCode.FORBIDDEN, "无权操作其他坐席负责的工单");
+        }
+    }
+
+    /** 查看越权防线：非管理员只能查看「未分配」或「分配给我」的工单 */
+    private void assertViewScope(TicketDO ticket) {
+        LoginUser user = UserContextHolder.get();
+        if (user == null || isAdmin(user)) {
+            return;
+        }
+        Long myAgentId = user.getAgentId();
+        boolean visible;
+        if (myAgentId == null) {
+            visible = ticket.getAgentId() == null; // 非坐席角色只见未分配工单
+        } else {
+            visible = ticket.getAgentId() == null || myAgentId.equals(ticket.getAgentId());
+        }
+        if (!visible) {
+            throw new BusinessException(ErrorCode.FORBIDDEN, "无权查看该工单");
+        }
+    }
+
+    /** PII 脱敏：customerContact 保留首尾，中部打码（管理员可见明文） */
+    private String maskContact(String contact) {
+        if (contact == null || contact.isBlank()) {
+            return contact;
+        }
+        String c = contact.trim();
+        if (c.length() <= 4) {
+            return "*".repeat(c.length());
+        }
+        return c.substring(0, 2) + "*".repeat(Math.min(c.length() - 4, 6)) + c.substring(c.length() - 2);
     }
 
     private void writeStatusLog(Long ticketId, TicketStatus from, TicketStatus to,
@@ -402,7 +494,12 @@ public class TicketServiceImpl implements TicketService {
         vo.setAgentId(ticket.getAgentId());
         vo.setAssignStrategy(ticket.getAssignStrategy());
         vo.setCustomerName(ticket.getCustomerName());
-        vo.setCustomerContact(ticket.getCustomerContact());
+        // P0-10：联系方式对非管理员脱敏（管理员/系统上下文看明文）
+        if (isAdmin(UserContextHolder.get())) {
+            vo.setCustomerContact(ticket.getCustomerContact());
+        } else {
+            vo.setCustomerContact(maskContact(ticket.getCustomerContact()));
+        }
         vo.setSlaPolicyId(ticket.getSlaPolicyId());
         vo.setFirstResponseDeadline(ticket.getFirstResponseDeadline());
         vo.setResolveDeadline(ticket.getResolveDeadline());

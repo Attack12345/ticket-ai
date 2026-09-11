@@ -1,6 +1,7 @@
 package com.ticketai.service.impl;
 
 import com.ticketai.dto.ChannelTicketCreateDTO;
+import com.ticketai.common.exception.BusinessException;
 import com.ticketai.entity.ChannelDO;
 import com.ticketai.entity.ChannelMessageDO;
 import com.ticketai.entity.TicketDO;
@@ -20,6 +21,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -38,9 +40,14 @@ class ChannelServiceImplTest {
     private TicketService ticketService;
     @Mock
     private TicketMapper ticketMapper;
+    @Mock
+    private org.springframework.data.redis.core.StringRedisTemplate stringRedisTemplate;
+    @Mock
+    private org.springframework.data.redis.core.ValueOperations<String, String> valueOperations;
 
     private ChannelServiceImpl newService() {
-        return new ChannelServiceImpl(channelMapper, channelMessageMapper, ticketService, ticketMapper);
+        return new ChannelServiceImpl(channelMapper, channelMessageMapper, ticketService,
+                ticketMapper, stringRedisTemplate);
     }
 
     private ChannelTicketCreateDTO dto() {
@@ -131,5 +138,52 @@ class ChannelServiceImplTest {
         m.setMessageNo("MSG-001");
         m.setTicketId(10L);
         return m;
+    }
+
+    // ---------- P0-2 渠道鉴权 ----------
+
+    @Test
+    @DisplayName("P0-2：缺失渠道凭证 → 401")
+    void missingCredentialRejected() {
+        BusinessException ex = org.junit.jupiter.api.Assertions.assertThrows(BusinessException.class,
+                () -> newService().assertWebApiRequest(null));
+        assertEquals(401, ex.getCode());
+    }
+
+    @Test
+    @DisplayName("P0-2：无效渠道凭证 → 401")
+    void invalidCredentialRejected() {
+        when(channelMapper.selectOne(any())).thenReturn(null);
+        BusinessException ex = org.junit.jupiter.api.Assertions.assertThrows(BusinessException.class,
+                () -> newService().assertWebApiRequest("Bearer wrong-key"));
+        assertEquals(401, ex.getCode());
+    }
+
+    @Test
+    @DisplayName("P0-2：有效凭证 + 超额请求 → 429 限流")
+    void overRateLimitRejected() {
+        ChannelDO channel = webApiChannel();
+        channel.setAppKey("dev-channel-key");
+        when(channelMapper.selectOne(any())).thenReturn(channel);
+        when(stringRedisTemplate.opsForValue()).thenReturn(valueOperations);
+        when(valueOperations.increment(any())).thenReturn(601L);
+
+        BusinessException ex = org.junit.jupiter.api.Assertions.assertThrows(BusinessException.class,
+                () -> newService().assertWebApiRequest("Bearer dev-channel-key"));
+        assertEquals(429, ex.getCode());
+    }
+
+    @Test
+    @DisplayName("P0-2：有效凭证 + 首次请求 → 放行")
+    void validCredentialPassed() {
+        ChannelDO channel = webApiChannel();
+        channel.setAppKey("dev-channel-key");
+        when(channelMapper.selectOne(any())).thenReturn(channel);
+        when(stringRedisTemplate.opsForValue()).thenReturn(valueOperations);
+        when(valueOperations.increment(any())).thenReturn(1L);
+
+        newService().assertWebApiRequest("Bearer dev-channel-key"); // 不抛异常即通过
+
+        verify(stringRedisTemplate).expire(any(), anyLong(), any());
     }
 }

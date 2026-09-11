@@ -19,7 +19,9 @@ import com.ticketai.mapper.SysUserMapper;
 import com.ticketai.mapper.SysUserRoleMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.CommandLineRunner;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.stereotype.Component;
 
@@ -28,14 +30,20 @@ import java.util.List;
 
 /**
  * 初始数据初始化（DEV_DOC schema.sql 说明）：
- * sys_user 为空时创建 admin（管理员）/ agent01（坐席）账号，并绑定对应角色。
+ * 演示账号（admin/agent01）仅按开关播种（默认开；生产 app.init.seed-demo-accounts=false 关闭）；
+ * 角色-权限绑定为生产必要，始终执行。
  */
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class DataInitializer implements CommandLineRunner {
 
-    public static final String DEFAULT_PASSWORD = "Admin@12345";
+    /** 演示账号统一初始密码（仅开发环境使用；禁止在日志中明文输出） */
+    private static final String DEFAULT_PASSWORD = "Admin@12345";
+
+    /** 生产播种演示账号会产生永久后门账号，必须通过 app.init.seed-demo-accounts=false 关闭 */
+    @Value("${app.init.seed-demo-accounts:true}")
+    private boolean seedDemoAccounts;
 
     private final SysUserMapper sysUserMapper;
     private final SysRoleMapper sysRoleMapper;
@@ -48,6 +56,19 @@ public class DataInitializer implements CommandLineRunner {
 
     @Override
     public void run(String... args) {
+        if (Boolean.TRUE.equals(seedDemoAccounts)) {
+            initDemoAccounts();
+        } else {
+            log.info("演示账号播种已关闭（app.init.seed-demo-accounts=false）");
+        }
+        initRolePermissions();
+        if (Boolean.TRUE.equals(seedDemoAccounts)) {
+            initAgentProfiles();
+        }
+    }
+
+    /** 仅开发环境：播种 admin / agent01 演示账号（生产关闭） */
+    private void initDemoAccounts() {
         BCryptPasswordEncoder encoder = new BCryptPasswordEncoder();
         String encoded = encoder.encode(DEFAULT_PASSWORD);
         LocalDateTime now = LocalDateTime.now();
@@ -55,13 +76,11 @@ public class DataInitializer implements CommandLineRunner {
         if (sysUserMapper.selectCount(new LambdaQueryWrapper<>()) == 0) {
             createUser("admin", "管理员", encoded, now, "ADMIN");
             createUser("agent01", "坐席一号", encoded, now, "AGENT");
-            log.info("初始化完成：创建 admin / agent01（密码 {}）", DEFAULT_PASSWORD);
+            // 安全红线：日志禁止输出明文口令
+            log.info("初始化完成：创建演示账号 admin / agent01（初始密码见 README，仅开发环境，生产请在初始化后立即改密）");
         } else {
             log.info("初始化跳过：sys_user 已有数据");
         }
-
-        initRolePermissions();
-        initAgentProfiles();
     }
 
     /** 坐席档案初始化（幂等）：agent01 用户 → agent 档案，并加入售后组 */
@@ -111,7 +130,7 @@ public class DataInitializer implements CommandLineRunner {
 
         List<String> agentPermCodes = List.of(
                 "ticket:view", "ticket:claim", "ticket:reply",
-                "ticket:resolve", "ticket:close", "ticket:escalate",
+                "ticket:resolve", "ticket:close", "ticket:escalate", "ticket:edit",
                 "dashboard:view");
         List<Long> agentPermIds = allPermissions.stream()
                 .filter(p -> agentPermCodes.contains(p.getCode()))
@@ -130,7 +149,12 @@ public class DataInitializer implements CommandLineRunner {
             SysRolePermissionDO rp = new SysRolePermissionDO();
             rp.setRoleId(role.getId());
             rp.setPermissionId(permissionId);
-            sysRolePermissionMapper.insert(rp);
+            try {
+                sysRolePermissionMapper.insert(rp);
+            } catch (DuplicateKeyException e) {
+                // P1-12：多副本并发首启，uk 唯一键兜底（已存在则跳过）
+                log.debug("角色-权限已存在，跳过: roleId={}, permissionId={}", role.getId(), permissionId);
+            }
         }
     }
 
@@ -143,14 +167,29 @@ public class DataInitializer implements CommandLineRunner {
         user.setCreateBy("system");
         user.setCreateTime(now);
         user.setUpdateTime(now);
-        sysUserMapper.insert(user);
+        try {
+            sysUserMapper.insert(user);
+        } catch (DuplicateKeyException e) {
+            // P1-12：uk_username 唯一键兜底并发首启，查回已存在用户绑定角色
+            SysUserDO existed = sysUserMapper.selectOne(new LambdaQueryWrapper<SysUserDO>()
+                    .eq(SysUserDO::getUsername, username));
+            if (existed != null) {
+                user = existed;
+            } else {
+                throw e;
+            }
+        }
 
         SysRoleDO role = sysRoleMapper.selectOne(new LambdaQueryWrapper<SysRoleDO>().eq(SysRoleDO::getCode, roleCode));
         if (role != null) {
             SysUserRoleDO userRole = new SysUserRoleDO();
             userRole.setUserId(user.getId());
             userRole.setRoleId(role.getId());
-            sysUserRoleMapper.insert(userRole);
+            try {
+                sysUserRoleMapper.insert(userRole);
+            } catch (DuplicateKeyException e) {
+                log.debug("用户-角色已存在，跳过: userId={}, roleId={}", user.getId(), role.getId());
+            }
         }
     }
 }
